@@ -209,8 +209,8 @@ def clean_mrz_image(mrz_img):
     _, img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     # Light erosion
-    kernel = np.ones((2,2), np.uint8)
-    img = cv2.erode(img, kernel, iterations=1)
+    # kernel = np.ones((2,2), np.uint8)
+    # img = cv2.erode(img, kernel, iterations=1)
 
     return img
 

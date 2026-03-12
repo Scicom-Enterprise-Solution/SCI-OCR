@@ -43,6 +43,15 @@ CLOSE_KERNEL_SIZE = 15
 # Minimum contour area as a fraction of the detection image area
 MIN_AREA_FRACTION = 0.05
 
+# Progressive epsilon factors for contour approximation fallback.
+# Some photos produce noisy boundaries where 0.02 is too strict.
+APPROX_EPSILON_FACTORS = (0.02, 0.03, 0.04, 0.05, 0.08)
+
+# Acceptable aspect-ratio range for the document rectangle candidate.
+# Covers both landscape and portrait captures with perspective skew.
+MIN_DOC_ASPECT_RATIO = 0.45
+MAX_DOC_ASPECT_RATIO = 2.40
+
 
 # ---------------------------------------------------------------------------
 # Step 1 — Render PDF page to numpy image
@@ -69,14 +78,14 @@ def render_pdf_page(pdf_path: str, dpi: int = DPI) -> np.ndarray:
     pixmap = page.get_pixmap(matrix=matrix, alpha=False)
     doc.close()
 
-    # Convert raw bytes → numpy array → RGB → BGR (OpenCV)
+    # Convert raw bytes -> numpy array -> RGB -> BGR (OpenCV)
     img_rgb = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
         pixmap.height, pixmap.width, 3
     )
     img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
-    print(f"[Step 1] Rendered '{pdf_path}' at {dpi} DPI  →  "
-          f"{img_bgr.shape[1]}×{img_bgr.shape[0]} px (W×H)")
+    print(f"[Step 1] Rendered '{pdf_path}' at {dpi} DPI -> "
+          f"{img_bgr.shape[1]}x{img_bgr.shape[0]} px (W x H)")
     return img_bgr
 
 
@@ -103,7 +112,7 @@ def preprocess_image(img_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray, float
     det_w = int(w * detection_scale)
     det_h = int(h * detection_scale)
     small = cv2.resize(gray, (det_w, det_h), interpolation=cv2.INTER_AREA)
-    print(f"[Step 2] Detection scale: {detection_scale:.3f}  →  {det_w}×{det_h} px")
+    print(f"[Step 2] Detection scale: {detection_scale:.3f} -> {det_w}x{det_h} px")
 
     # Gaussian blur reduces noise so Canny picks up real edges, not texture
     blurred = cv2.GaussianBlur(small, BLUR_KERNEL, sigmaX=0)
@@ -162,6 +171,30 @@ def find_document_contour(
     debug_img = img_bgr.copy()
     inv_scale = 1.0 / detection_scale
     quad_pts_full = None
+    best_fallback_pts = None
+    best_fallback_score = -1.0
+
+    def quad_score(quad_pts_det: np.ndarray, area_det: float) -> float:
+        """Score candidate quads by area, centrality, and plausible aspect ratio."""
+        x, y, w, h = cv2.boundingRect(quad_pts_det.astype(np.int32))
+        if w <= 0 or h <= 0:
+            return -1.0
+
+        bbox_area = float(w * h)
+        fill_ratio = min(1.0, max(0.0, area_det / max(1.0, bbox_area)))
+
+        aspect = w / float(h)
+        if not (MIN_DOC_ASPECT_RATIO <= aspect <= MAX_DOC_ASPECT_RATIO):
+            return -1.0
+
+        cx = x + w / 2.0
+        cy = y + h / 2.0
+        dx = abs(cx - det_w / 2.0) / max(1.0, det_w / 2.0)
+        dy = abs(cy - det_h / 2.0) / max(1.0, det_h / 2.0)
+        center_penalty = min(1.0, (dx + dy) / 2.0)
+
+        area_norm = min(1.0, area_det / max(1.0, det_w * det_h))
+        return area_norm * 0.70 + fill_ratio * 0.25 + (1.0 - center_penalty) * 0.05
 
     for idx, contour in enumerate(contours):
         area = cv2.contourArea(contour)
@@ -171,34 +204,49 @@ def find_document_contour(
             print(f"[Step 3] Contour #{idx} area={int(area)} — below threshold, stopping search.")
             break
 
-        # Approximate the contour to a polygon.
-        # epsilon controls how aggressively corners are merged.
         perimeter = cv2.arcLength(contour, closed=True)
-        epsilon = APPROX_EPSILON * perimeter
-        approx = cv2.approxPolyDP(contour, epsilon, closed=True)
 
-        print(f"[Step 3] Contour #{idx}: area={int(area):,}  vertices={len(approx)}")
+        approx = None
+        for eps_factor in APPROX_EPSILON_FACTORS:
+            eps = eps_factor * perimeter
+            candidate = cv2.approxPolyDP(contour, eps, closed=True)
+            if len(candidate) == 4:
+                approx = candidate
+                print(f"[Step 3] Contour #{idx}: area={int(area):,}  vertices=4  (eps={eps_factor:.2f})")
+                break
 
-        if len(approx) == 4:
-            # Points are in detection-scale coordinates; scale back to original
+        if approx is not None:
             quad_pts_det = approx.reshape(4, 2).astype(np.float32)
-            quad_pts_full = quad_pts_det * inv_scale
-
-            print(f"[Step 3] ✓ Quadrilateral found at contour #{idx}")
-            print(f"[Step 3]   Detection corners: {quad_pts_det.tolist()}")
-            print(f"[Step 3]   Full-res corners:  {quad_pts_full.tolist()}")
-
-            # Draw the winning contour on the full-resolution debug image
-            approx_full = (approx.astype(np.float32) * inv_scale).astype(np.int32)
-            cv2.drawContours(debug_img, [approx_full], -1, (0, 255, 0), thickness=6)
-            for pt in quad_pts_full:
-                cv2.circle(debug_img, tuple(pt.astype(int)), radius=20,
-                           color=(0, 0, 255), thickness=-1)
-            break
+            score = quad_score(quad_pts_det, area)
+            if score > best_fallback_score:
+                best_fallback_score = score
+                best_fallback_pts = quad_pts_det
+            print(f"[Step 3]   candidate quad score={score:.3f}")
         else:
-            # Draw rejected contours in blue (scaled to full resolution)
-            approx_full = (approx.astype(np.float32) * inv_scale).astype(np.int32)
-            cv2.drawContours(debug_img, [approx_full], -1, (255, 0, 0), thickness=3)
+            # Fallback: minimum-area rectangle often succeeds when contour has many vertices.
+            rect = cv2.minAreaRect(contour)
+            box = cv2.boxPoints(rect).astype(np.float32)
+            score = quad_score(box, area)
+            print(f"[Step 3] Contour #{idx}: area={int(area):,}  vertices>4  minRect score={score:.3f}")
+            if score > best_fallback_score:
+                best_fallback_score = score
+                best_fallback_pts = box
+
+            # Draw rejected/inspected contour approximation in blue for diagnostics.
+            contour_full = (contour.astype(np.float32) * inv_scale).astype(np.int32)
+            cv2.drawContours(debug_img, [contour_full], -1, (255, 0, 0), thickness=2)
+
+    if best_fallback_pts is not None and best_fallback_score > 0:
+        quad_pts_full = best_fallback_pts * inv_scale
+        print(f"[Step 3] ✓ Selected best quadrilateral candidate with score={best_fallback_score:.3f}")
+        print(f"[Step 3]   Detection corners: {best_fallback_pts.tolist()}")
+        print(f"[Step 3]   Full-res corners:  {quad_pts_full.tolist()}")
+
+        quad_cnt_full = (best_fallback_pts.reshape(-1, 1, 2) * inv_scale).astype(np.int32)
+        cv2.drawContours(debug_img, [quad_cnt_full], -1, (0, 255, 0), thickness=6)
+        for pt in quad_pts_full:
+            cv2.circle(debug_img, tuple(pt.astype(int)), radius=20,
+                       color=(0, 0, 255), thickness=-1)
 
     if quad_pts_full is None:
         print("[Step 3] ✗ No quadrilateral contour detected. "
@@ -246,7 +294,7 @@ def perspective_correction(
     ordered = order_points(quad_pts)
     tl, tr, br, bl = ordered
 
-    print(f"[Step 4] Ordered corners → "
+    print(f"[Step 4] Ordered corners -> "
           f"TL={tl.tolist()}  TR={tr.tolist()}  BR={br.tolist()}  BL={bl.tolist()}")
 
     # Compute output width: max of top-edge and bottom-edge lengths
@@ -259,7 +307,7 @@ def perspective_correction(
     height_right = np.linalg.norm(br - tr)
     out_h = int(max(height_left, height_right))
 
-    print(f"[Step 4] Output dimensions: {out_w}×{out_h} px (W×H)")
+    print(f"[Step 4] Output dimensions: {out_w}x{out_h} px (W x H)")
 
     # Destination rectangle corners (top-left origin)
     dst = np.array([

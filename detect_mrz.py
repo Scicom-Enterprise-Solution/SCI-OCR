@@ -89,7 +89,7 @@ def load_image(path: str) -> tuple[np.ndarray, np.ndarray]:
     img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
     h, w = img_bgr.shape[:2]
-    print(f"[Step 1] Loaded '{path}'  →  {w}×{h} px (W×H)")
+    print(f"[Step 1] Loaded '{path}' -> {w}x{h} px (W x H)")
     return img_bgr, img_gray
 
 
@@ -109,7 +109,7 @@ def apply_blackhat(gray: np.ndarray) -> np.ndarray:
         cv2.MORPH_RECT, (BLACKHAT_KERNEL_W, BLACKHAT_KERNEL_H)
     )
     blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
-    print(f"[Step 2] Blackhat kernel: {BLACKHAT_KERNEL_W}×{BLACKHAT_KERNEL_H}")
+    print(f"[Step 2] Blackhat kernel: {BLACKHAT_KERNEL_W}x{BLACKHAT_KERNEL_H}")
     return blackhat
 
 
@@ -180,7 +180,7 @@ def close_and_dilate(thresh: np.ndarray) -> np.ndarray:
     dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
     dilated = cv2.dilate(closed, dilate_kernel, iterations=DILATE_ITERATIONS)
 
-    print(f"[Step 5] Morphological closing ({CLOSE_KERNEL_W}×{CLOSE_KERNEL_H}) "
+    print(f"[Step 5] Morphological closing ({CLOSE_KERNEL_W}x{CLOSE_KERNEL_H}) "
           f"+ {DILATE_ITERATIONS} dilation iteration(s)")
     return dilated
 
@@ -336,8 +336,8 @@ def crop_mrz(img_bgr: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray
     y2 = min(img_h, y + h + CROP_PAD_Y)
 
     crop = img_bgr[y1:y2, x1:x2]
-    print(f"[Step 7] MRZ crop: ({x1},{y1}) → ({x2},{y2})  "
-          f"size={x2-x1}×{y2-y1} px")
+    print(f"[Step 7] MRZ crop: ({x1},{y1}) -> ({x2},{y2})  "
+          f"size={x2-x1}x{y2-y1} px")
     return crop
 
 
@@ -387,7 +387,6 @@ def draw_debug_boxes(
     return debug
 
 
-# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
@@ -409,9 +408,7 @@ def main() -> None:
     roi_top = int(img_h * ROI_TOP_FRACTION)
     roi = img_gray[roi_top:, :]
     print(f"[Step 1] ROI: bottom {100*(1-ROI_TOP_FRACTION):.0f}% of image  "
-          f"(rows {roi_top}–{img_h},  {img_w}×{img_h - roi_top} px)")
-
-    # ------------------------------------------------------------------
+            f"(rows {roi_top}-{img_h},  {img_w}x{img_h - roi_top} px)")
     # Step 2 — Blackhat morphology (on ROI)
     # ------------------------------------------------------------------
     blackhat = apply_blackhat(roi)
@@ -471,3 +468,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

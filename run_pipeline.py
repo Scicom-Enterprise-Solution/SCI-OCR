@@ -3,27 +3,29 @@ Passport MRZ OCR — Full Pipeline
 PDF → aligned document image → detected & cropped MRZ strip
 
 Runs both stages in sequence:
-  Stage 1 (preprocess_passport): PDF render → contour detection → perspective warp
+    Stage 1 (preprocess_passport): input load/render → contour detection → perspective warp
   Stage 2 (detect_mrz):          blackhat → gradient → threshold → MRZ crop
 
 Usage:
     python run_pipeline.py <path/to/passport.pdf>
+    python run_pipeline.py <path/to/passport.png>
 
 Output (all saved to output/):
-    rendered_page.png     — raw PDF render at 300 DPI
-    edges.png             — Canny edges (Stage 1 debug)
-    contours.png          — detected document contour (Stage 1 debug)
-    aligned_passport.png  — perspective-corrected passport page
-    mrz_blackhat.png      — blackhat morphology (Stage 2 debug)
-    mrz_gradient.png      — horizontal gradient (Stage 2 debug)
-    mrz_threshold.png     — Otsu threshold (Stage 2 debug)
-    mrz_closed.png        — morphological closing (Stage 2 debug)
-    mrz_detected.png      — annotated passport with MRZ bounding boxes
-    mrz_region.png        — final cropped MRZ strip (pipeline output)
+    <input_name>/rendered_page.png     — raw render / loaded image
+    <input_name>/edges.png             — Canny edges (Stage 1 debug)
+    <input_name>/contours.png          — detected document contour (Stage 1 debug)
+    <input_name>/aligned_passport.png  — perspective-corrected passport page
+    <input_name>/mrz_blackhat.png      — blackhat morphology (Stage 2 debug)
+    <input_name>/mrz_gradient.png      — horizontal gradient (Stage 2 debug)
+    <input_name>/mrz_threshold.png     — Otsu threshold (Stage 2 debug)
+    <input_name>/mrz_closed.png        — morphological closing (Stage 2 debug)
+    <input_name>/mrz_detected.png      — annotated passport with MRZ bounding boxes
+    <input_name>/mrz_region.png        — final cropped MRZ strip (pipeline output)
 """
 
 import os
 import sys
+import cv2
 from env_utils import load_env_file
 
 
@@ -38,36 +40,104 @@ load_env_file()
 import preprocess_passport as stage1
 import detect_mrz          as stage2
 import ocr_mrz             as stage3
+from face_detection import orient_with_face_hint, extract_face_crop, draw_face_box
+from mrz_rotation import detect_mrz_with_rotation_fallback
+from report_utils import write_pipeline_report, parse_mrz_td3
+
+
+SUPPORTED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+
+
+def load_stage1_input(input_path: str):
+    """Load either a PDF page or an image file into a BGR numpy image."""
+    ext = os.path.splitext(input_path)[1].lower()
+
+    if ext == ".pdf":
+        print(f"[Stage 1] Input type: PDF ({input_path})")
+        return stage1.render_pdf_page(input_path, dpi=stage1.DPI)
+
+    if ext in SUPPORTED_IMAGE_EXTS:
+        print(f"[Stage 1] Input type: image ({input_path})")
+        img_bgr = cv2.imread(input_path, cv2.IMREAD_COLOR)
+        if img_bgr is None:
+            print(f"[ERROR] Unable to read image: {input_path}")
+            sys.exit(1)
+        h, w = img_bgr.shape[:2]
+        print(f"[Stage 1] Loaded image at {w}x{h} px (W×H)")
+        return img_bgr
+
+    print(f"[ERROR] Unsupported input type: '{ext}'")
+    print("        Supported: .pdf, .png, .jpg, .jpeg, .bmp, .tif, .tiff, .webp")
+    sys.exit(1)
+
+
+def build_output_prefix(input_path: str) -> str:
+    """Use input filename stem as a stable prefix for all output artifacts."""
+    stem = os.path.splitext(os.path.basename(input_path))[0].strip()
+    if not stem:
+        return "input"
+    # Keep names filesystem-safe and readable.
+    safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in stem)
+    return safe
 
 
 def main() -> None:
-    env_pdf_path = os.getenv("PDF_PATH", stage1.PDF_PATH)
-    pdf_path = sys.argv[1] if len(sys.argv) > 1 else env_pdf_path
+    env_input_path = os.getenv("PDF_PATH", stage1.PDF_PATH)
+    input_path = sys.argv[1] if len(sys.argv) > 1 else env_input_path
 
-    output_dir = os.getenv("OUTPUT_DIR", stage1.OUTPUT_DIR)
+    base_output_dir = os.getenv("OUTPUT_DIR", stage1.OUTPUT_DIR)
+    output_prefix = build_output_prefix(input_path)
+    output_dir = os.path.join(base_output_dir, output_prefix)
     stage1.OUTPUT_DIR = output_dir
     stage2.OUTPUT_DIR = output_dir
     stage3.OUTPUT_DIR = output_dir
 
     os.makedirs(output_dir, exist_ok=True)
 
+    report = {
+        "status": "started",
+        "input": {
+            "path": os.path.abspath(input_path),
+            "ext": os.path.splitext(input_path)[1].lower(),
+            "sample_name": output_prefix,
+        },
+        "output_dir": os.path.abspath(output_dir),
+        "face": {
+            "detected": False,
+            "orientation_hint": None,
+            "faces_count": 0,
+            "bbox": None,
+        },
+        "mrz": {
+            "detected": False,
+            "orientation_used": None,
+            "bbox": None,
+            "line_bboxes": [],
+            "text": {
+                "line1": "",
+                "line2": "",
+            },
+            "parsed": {},
+        },
+    }
+
     # ======================================================================
-    # STAGE 1 — PDF → aligned passport image
+    # STAGE 1 — Input file → aligned passport image
     # ======================================================================
     print("=" * 60)
-    print("STAGE 1 — PDF render + document alignment")
+    print("STAGE 1 — Input load/render + document alignment")
     print("=" * 60)
 
-    # Step 1 — Render PDF
-    img_bgr = stage1.render_pdf_page(pdf_path, dpi=stage1.DPI)
+    # Step 1 — Load/render input
+    img_bgr = load_stage1_input(input_path)
     stage1.save(img_bgr, "rendered_page.png")
 
     # Step 2 — Edge detection (downscaled)
     edges, detection_scale = stage1.preprocess_image(img_bgr)
-    edges_display = __import__("cv2").resize(
+    edges_display = cv2.resize(
         edges,
         (img_bgr.shape[1], img_bgr.shape[0]),
-        interpolation=__import__("cv2").INTER_NEAREST,
+        interpolation=cv2.INTER_NEAREST,
     )
     stage1.save(edges_display, "edges.png")
 
@@ -78,6 +148,10 @@ def main() -> None:
     stage1.save(contour_debug, "contours.png")
 
     if quad_pts is None:
+        report["status"] = "failed"
+        report["error"] = "stage1_document_contour_not_found"
+        report_path = write_pipeline_report(output_dir, report)
+        print(f"[Report] {report_path}")
         print("\n[Pipeline] STAGE 1 FAILED: could not locate a document boundary.")
         print("           Check output/edges.png and output/contours.png for clues.")
         sys.exit(1)
@@ -85,6 +159,28 @@ def main() -> None:
     # Step 4 — Perspective correction
     aligned = stage1.perspective_correction(img_bgr, quad_pts)
     stage1.save(aligned, "aligned_passport.png")
+
+    # Face-based orientation hint + face extraction for downstream checks.
+    face_result = orient_with_face_hint(aligned)
+    aligned_for_stage2 = face_result["image"]
+    if face_result["label"] != "original":
+        print(f"[Stage 1] Face-based orientation hint applied: {face_result['label']}")
+        stage1.save(aligned_for_stage2, "aligned_passport.png")
+
+    report["face"]["orientation_hint"] = face_result["label"]
+    report["face"]["faces_count"] = int(face_result["faces_count"])
+
+    if face_result["face_bbox"] is not None:
+        face_crop = extract_face_crop(aligned_for_stage2, face_result["face_bbox"])
+        if face_crop is not None and face_crop.size > 0:
+            stage1.save(face_crop, "face_crop.png")
+        face_annotated = draw_face_box(aligned_for_stage2, face_result["face_bbox"])
+        stage1.save(face_annotated, "face_detected.png")
+        report["face"]["detected"] = True
+        report["face"]["bbox"] = [int(v) for v in face_result["face_bbox"]]
+        print(f"[Stage 1] Face detected (count={face_result['faces_count']}).")
+    else:
+        print("[Stage 1] No face detected; continuing with MRZ-based orientation fallback.")
 
     print("\n[Stage 1] Complete.\n")
 
@@ -95,41 +191,15 @@ def main() -> None:
     print("STAGE 2 — MRZ region detection")
     print("=" * 60)
 
-    img_h, img_w = aligned.shape[:2]
+    detection_result = detect_mrz_with_rotation_fallback(
+        aligned_for_stage2,
+    )
 
-    # Step 1 — Grayscale (aligned is already BGR from Stage 1)
-    import cv2, numpy as np
-    img_gray = cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY)
-    print(f"[Step 1] Passport image: {img_w}×{img_h} px (W×H)")
-
-    # Restrict processing to the bottom region where the MRZ always sits.
-    # Skipping the top avoids spurious wide contours from portrait / text fields.
-    roi_top = int(img_h * stage2.ROI_TOP_FRACTION)
-    roi     = img_gray[roi_top:, :]
-    print(f"[Step 1] ROI: rows {roi_top}–{img_h}  "
-          f"(bottom {100*(1-stage2.ROI_TOP_FRACTION):.0f}% of image)")
-
-    # Step 2 — Blackhat morphology (on ROI)
-    blackhat = stage2.apply_blackhat(roi)
-    stage2.save(blackhat, "mrz_blackhat.png")
-
-    # Step 3 — Horizontal gradient
-    gradient = stage2.compute_gradient(blackhat)
-    stage2.save(gradient, "mrz_gradient.png")
-
-    # Step 4 — Threshold
-    thresh = stage2.threshold_image(gradient)
-    stage2.save(thresh, "mrz_threshold.png")
-
-    # Step 5 — Morphological closing + dilation
-    closed = stage2.close_and_dilate(thresh)
-    stage2.save(closed, "mrz_closed.png")
-
-    # Step 6 — Contour detection and MRZ line filtering
-    mrz_lines, _ = stage2.find_mrz_contours(closed, img_h, img_w,
-                                             roi_y_offset=roi_top)
-
-    if not mrz_lines:
+    if not detection_result:
+        report["status"] = "failed"
+        report["error"] = "stage2_mrz_not_detected"
+        report_path = write_pipeline_report(output_dir, report)
+        print(f"[Report] {report_path}")
         print("\n[Pipeline] STAGE 2 FAILED: MRZ region not detected.")
         print("           Inspect the debug images in output/ for clues:")
         print("            mrz_blackhat.png  — should brighten the MRZ text area")
@@ -138,13 +208,24 @@ def main() -> None:
         print("            mrz_closed.png    — should show a solid rectangle near bottom")
         sys.exit(1)
 
+    working_aligned, mrz_lines, mrz_bbox, used_orientation = detection_result
+    if used_orientation != "original":
+        print(f"[Stage 2] MRZ found after orientation correction: {used_orientation}")
+        stage1.save(working_aligned, "aligned_passport.png")
+    else:
+        print("[Stage 2] MRZ found on original orientation")
+
+    report["mrz"]["detected"] = True
+    report["mrz"]["orientation_used"] = used_orientation
+    report["mrz"]["bbox"] = [int(v) for v in mrz_bbox]
+    report["mrz"]["line_bboxes"] = [[int(v) for v in bbox] for bbox in mrz_lines]
+
     # Step 7 — Merge the two line bboxes and crop
-    mrz_bbox = stage2.merge_bboxes(mrz_lines)
-    mrz_crop = stage2.crop_mrz(aligned, mrz_bbox)
+    mrz_crop = stage2.crop_mrz(working_aligned, mrz_bbox)
     stage2.save(mrz_crop, "mrz_region.png")
 
     # Step 8 — Debug visualisation
-    debug_img = stage2.draw_debug_boxes(aligned, mrz_lines, mrz_bbox)
+    debug_img = stage2.draw_debug_boxes(working_aligned, mrz_lines, mrz_bbox)
     stage2.save(debug_img, "mrz_detected.png")
 
     print("\n[Stage 2] Complete.\n")
@@ -165,6 +246,21 @@ def main() -> None:
 
     # Step 2 — Tesseract OCR
     mrz_text  = stage3.run_ocr(mrz_clean)
+
+    line1 = ""
+    line2 = ""
+    if isinstance(mrz_text, tuple) and len(mrz_text) >= 2:
+        line1, line2 = mrz_text[0], mrz_text[1]
+    elif isinstance(mrz_text, str):
+        line1 = mrz_text
+
+    report["mrz"]["text"]["line1"] = line1
+    report["mrz"]["text"]["line2"] = line2
+    report["mrz"]["parsed"] = parse_mrz_td3(line1, line2)
+    report["status"] = "success"
+
+    report_path = write_pipeline_report(output_dir, report)
+    print(f"[Report] {report_path}")
 
     print("\n[Stage 3] Final MRZ:")
     print("-" * 60)
