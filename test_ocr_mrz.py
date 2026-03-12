@@ -1,6 +1,7 @@
 import unittest
 
 from ocr_mrz import (
+    _pair_selection_key,
     is_valid_mrz_country_code,
     normalize_td3_line1,
     pair_consistency_bonus,
@@ -103,6 +104,40 @@ class TestLine2Checks(unittest.TestCase):
         )
 
         self.assertGreater(cleaner_score, noisier_score)
+
+
+class TestPairSelection(unittest.TestCase):
+    def test_pair_selection_prefers_lower_candidate_rank_over_lexicographic_text(self) -> None:
+        better_pair = {
+            "pair_score": 294.0,
+            "pair_bonus": 10.0,
+            "line1": {
+                "score": 114.0,
+                "candidate_rank": 0,
+                "text": "P<BGDALAM<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<",
+            },
+            "line2": {
+                "score": 150.0,
+                "candidate_rank": 0,
+                "text": "A098919372BGD0601038M36020815119012168<<<<26",
+            },
+        }
+        worse_pair = {
+            "pair_score": 294.0,
+            "pair_bonus": 10.0,
+            "line1": {
+                "score": 114.0,
+                "candidate_rank": 5,
+                "text": "P<BGDALAN<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<",
+            },
+            "line2": {
+                "score": 150.0,
+                "candidate_rank": 0,
+                "text": "A098919372BGD0601038M36020815119012168<<<<26",
+            },
+        }
+
+        self.assertGreater(_pair_selection_key(better_pair), _pair_selection_key(worse_pair))
 
 
 

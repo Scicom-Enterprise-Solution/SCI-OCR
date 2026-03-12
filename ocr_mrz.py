@@ -1121,6 +1121,29 @@ def _pick_top(candidates, score_key: str, topn: int = 5):
     return ordered[:topn]
 
 
+def _rank_candidates(candidates, score_key: str):
+    ordered = sorted(candidates, key=lambda x: x[score_key], reverse=True)
+    for rank, cand in enumerate(ordered):
+        cand["candidate_rank"] = rank
+    return ordered
+
+
+def _pair_selection_key(candidate_pair: dict) -> tuple:
+    line1_rank = candidate_pair["line1"].get("candidate_rank", 10**9)
+    line2_rank = candidate_pair["line2"].get("candidate_rank", 10**9)
+
+    return (
+        candidate_pair["pair_score"],
+        candidate_pair.get("pair_bonus", 0.0),
+        candidate_pair["line1"]["score"],
+        candidate_pair["line2"]["score"],
+        -line1_rank,
+        -line2_rank,
+        candidate_pair["line1"]["text"],
+        candidate_pair["line2"]["text"],
+    )
+
+
 def run_ocr(mrz_img):
     if isinstance(mrz_img, str):
         img = cv2.imread(mrz_img, cv2.IMREAD_COLOR)
@@ -1173,14 +1196,17 @@ def run_ocr(mrz_img):
         if not line1_candidates or not line2_candidates:
             continue
 
-        line1_top = _pick_top(line1_candidates, "score", topn=5)
-        line2_top = _pick_top(line2_candidates, "score", topn=5)
+        line1_ranked = _rank_candidates(line1_candidates, "score")
+        line2_ranked = _rank_candidates(line2_candidates, "score")
+
+        line1_top = line1_ranked[:5]
+        line2_top = line2_ranked[:5]
 
         best_pair = None
         pair_count = 0
 
-        for c1 in line1_candidates:
-            for c2 in line2_candidates:
+        for c1 in line1_ranked:
+            for c2 in line2_ranked:
                 pair_count += 1
                 checks = c2.get("checks") or validate_td3_checks(c2["text"])
                 pair_bonus = pair_consistency_bonus(c1["text"], c2["text"])
@@ -1200,24 +1226,10 @@ def run_ocr(mrz_img):
                     "repairs_applied": list(c1.get("repairs", [])),
                 }
 
-                candidate_key = (
-                    candidate_pair["pair_score"],
-                    candidate_pair["pair_bonus"],
-                    candidate_pair["line1"]["score"],
-                    candidate_pair["line2"]["score"],
-                    candidate_pair["line1"]["text"],
-                    candidate_pair["line2"]["text"],
-                )
+                candidate_key = _pair_selection_key(candidate_pair)
                 best_key = None
                 if best_pair is not None:
-                    best_key = (
-                        best_pair["pair_score"],
-                        best_pair.get("pair_bonus", 0.0),
-                        best_pair["line1"]["score"],
-                        best_pair["line2"]["score"],
-                        best_pair["line1"]["text"],
-                        best_pair["line2"]["text"],
-                    )
+                    best_key = _pair_selection_key(best_pair)
 
                 if best_pair is None or candidate_key > best_key:
                     best_pair = candidate_pair
