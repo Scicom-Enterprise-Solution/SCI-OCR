@@ -90,6 +90,17 @@ def build_output_prefix(input_path: str) -> str:
     return safe
 
 
+def build_stage2_attempts(input_path: str, aligned_image, original_image):
+    """Choose Stage 2 MRZ detection sources in priority order."""
+    attempts = [("aligned_passport", aligned_image)]
+    ext = os.path.splitext(input_path)[1].lower()
+
+    if ext in SUPPORTED_IMAGE_EXTS and original_image is not None and original_image is not aligned_image:
+        attempts.append(("original_input", original_image))
+
+    return attempts
+
+
 def main() -> None:
     env_input_path = os.getenv("PDF_PATH", stage1.PDF_PATH)
     input_path = sys.argv[1] if len(sys.argv) > 1 else env_input_path
@@ -120,6 +131,8 @@ def main() -> None:
         },
         "mrz": {
             "detected": False,
+            "detection_input": None,
+            "detection_inputs_tried": [],
             "orientation_used": None,
             "bbox": None,
             "line_bboxes": [],
@@ -221,7 +234,20 @@ def main() -> None:
     print("STAGE 2 — MRZ region detection")
     print("=" * 60)
 
-    detection_result = detect_mrz_with_rotation_fallback(aligned_for_stage2)
+    detection_result = None
+    detection_input = None
+    stage2_attempts = build_stage2_attempts(input_path, aligned_for_stage2, img_bgr)
+
+    for source_label, source_image in stage2_attempts:
+        report["mrz"]["detection_inputs_tried"].append(source_label)
+        print(f"[Stage 2] Detection source: {source_label}")
+        detection_result = detect_mrz_with_rotation_fallback(source_image)
+        if detection_result:
+            detection_input = source_label
+            break
+
+        if len(stage2_attempts) > 1 and source_label != stage2_attempts[-1][0]:
+            print(f"[Stage 2] MRZ not found on {source_label}; retrying next source.")
 
     if not detection_result:
         report["status"] = "failed"
@@ -238,13 +264,17 @@ def main() -> None:
 
     working_aligned, mrz_lines, mrz_bbox, used_orientation = detection_result
 
-    if used_orientation != "original":
+    if detection_input != "aligned_passport":
+        print(f"[Stage 2] MRZ found using fallback source: {detection_input}")
+        stage1.save(working_aligned, "aligned_passport.png")
+    elif used_orientation != "original":
         print(f"[Stage 2] MRZ found after orientation correction: {used_orientation}")
         stage1.save(working_aligned, "aligned_passport.png")
     else:
         print("[Stage 2] MRZ found on original orientation")
 
     report["mrz"]["detected"] = True
+    report["mrz"]["detection_input"] = detection_input
     report["mrz"]["orientation_used"] = used_orientation
     report["mrz"]["bbox"] = [int(v) for v in mrz_bbox]
     report["mrz"]["line_bboxes"] = [[int(v) for v in bbox] for bbox in mrz_lines]
