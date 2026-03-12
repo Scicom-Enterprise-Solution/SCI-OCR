@@ -118,6 +118,7 @@ def main() -> None:
                 "line2": "",
             },
             "parsed": {},
+            "ocr": {},
         },
     }
 
@@ -244,19 +245,23 @@ def main() -> None:
     mrz_clean = stage3.clean_mrz_image(mrz_crop)
     stage3.save(mrz_clean, "mrz_clean.png")
 
-    # Step 2 — Tesseract OCR
-    mrz_text  = stage3.run_ocr(mrz_clean)
+    # Step 2 — Tesseract OCR on original crop
+    ocr_result = stage3.run_ocr(mrz_crop)
 
     line1 = ""
     line2 = ""
-    if isinstance(mrz_text, tuple) and len(mrz_text) >= 2:
-        line1, line2 = mrz_text[0], mrz_text[1]
-    elif isinstance(mrz_text, str):
-        line1 = mrz_text
+    ocr_meta = {}
+    if isinstance(ocr_result, tuple) and len(ocr_result) >= 2:
+        line1, line2 = ocr_result[0], ocr_result[1]
+        if len(ocr_result) >= 3 and isinstance(ocr_result[2], dict):
+            ocr_meta = ocr_result[2]
+    elif isinstance(ocr_result, str):
+        line1 = ocr_result
 
     report["mrz"]["text"]["line1"] = line1
     report["mrz"]["text"]["line2"] = line2
-    report["mrz"]["parsed"] = parse_mrz_td3(line1, line2)
+    report["mrz"]["parsed"] = ocr_meta.get("parsed_fields") or parse_mrz_td3(line1, line2)
+    report["mrz"]["ocr"] = ocr_meta
     report["status"] = "success"
 
     report_path = write_pipeline_report(output_dir, report)
@@ -264,7 +269,11 @@ def main() -> None:
 
     print("\n[Stage 3] Final MRZ:")
     print("-" * 60)
-    print(mrz_text if mrz_text else "(no text detected)")
+    if line1 or line2:
+        print(line1)
+        print(line2)
+    else:
+        print("(no text detected)")
     print("-" * 60)
     print("\n[Stage 3] Complete.\n")
 
@@ -281,7 +290,11 @@ def main() -> None:
     print(f"  MRZ cleaned      : {out}\\mrz_clean.png")
     print()
     print("Extracted MRZ text:")
-    print(mrz_text if mrz_text else "(no text)")
+    if line1 or line2:
+        print(line1)
+        print(line2)
+    else:
+        print("(no text)")
 
 
 if __name__ == "__main__":
