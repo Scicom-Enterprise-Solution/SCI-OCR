@@ -1,6 +1,7 @@
 import unittest
 
 from ocr_mrz import (
+    _apply_candidate_support_bonus,
     _pair_selection_key,
     is_valid_mrz_country_code,
     normalize_td3_line1,
@@ -61,6 +62,24 @@ class TestLine1Repair(unittest.TestCase):
     def test_accepts_uto_mrz_country_code(self) -> None:
         self.assertTrue(is_valid_mrz_country_code("UTO"))
 
+    def test_support_bonus_prefers_consensus_line1_candidate(self) -> None:
+        expected = "P<JORALMOUSA<<AWS<WAJDI<FAROUQ<<<<<<<<<<<<<<"
+        wrong = "P<JORALMOUSA<<AUS<WAJDI<FAROUR<<<<<<<<<<<<<<"
+        candidates = [
+            {"text": expected, "score": 82.5}
+            for _ in range(18)
+        ] + [
+            {"text": wrong, "score": 86.5}
+            for _ in range(5)
+        ]
+
+        _apply_candidate_support_bonus(candidates)
+
+        best = max(candidates, key=lambda cand: cand["score"])
+
+        self.assertEqual(best["text"], expected)
+        self.assertGreater(best["score"], max(c["score"] for c in candidates if c["text"] == wrong))
+
 
 class TestLine2Checks(unittest.TestCase):
     def test_valid_td3_line2_reports_composite_check(self) -> None:
@@ -93,6 +112,15 @@ class TestLine2Checks(unittest.TestCase):
         )
 
         self.assertEqual(repaired[13:19], "001208")
+        self.assertEqual(checks["passed_count"], 5)
+
+    def test_validate_and_correct_mrz_repairs_document_number_q_to_o_when_checksum_matches(self) -> None:
+        _, repaired, checks = validate_and_correct_mrz(
+            "",
+            "Q0Q7341557GIN0012083F27051142001208017021578",
+        )
+
+        self.assertEqual(repaired[:10], "O007341557")
         self.assertEqual(checks["passed_count"], 5)
 
     def test_score_td3_line2_prefers_fewer_ambiguous_doc_chars(self) -> None:

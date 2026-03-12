@@ -1,5 +1,6 @@
 import os
 import re
+import math
 import shutil
 import itertools
 import cv2
@@ -182,10 +183,15 @@ NUMERIC_FIELD_SUBS = {
 }
 
 AMBIGUOUS_DOC_CHARS = set(NUMERIC_FIELD_SUBS)
+DOC_NUMBER_AMBIGUOUS_SUBS = {
+    **AMBIGUOUS_FIELD_SUBS,
+    "Q": ("0", "O"),
+}
 
 MIN_TOKEN_REPAIR_SCORE_GAIN = 6.0
 
 PAIR_COUNTRY_MATCH_BONUS = 10.0
+CANDIDATE_SUPPORT_BONUS_SCALE = 3.0
 
 
 # -------------------------------------------------------
@@ -288,21 +294,26 @@ def checksum(data: str) -> str:
     return str(total % 10)
 
 
-def _limited_field_variants(data: str, max_edits: int = 2) -> set[str]:
+def _limited_field_variants(
+    data: str,
+    max_edits: int = 2,
+    substitutions: dict[str, tuple[str, ...]] | None = None,
+) -> set[str]:
     data = normalize_mrz(data)
+    substitutions = substitutions or AMBIGUOUS_FIELD_SUBS
     variants = {data}
 
-    pos = [i for i, ch in enumerate(data) if ch in AMBIGUOUS_FIELD_SUBS]
+    pos = [i for i, ch in enumerate(data) if ch in substitutions]
 
     for i in pos:
         ch = data[i]
-        for repl in AMBIGUOUS_FIELD_SUBS[ch]:
+        for repl in substitutions[ch]:
             variants.add(data[:i] + repl + data[i + 1:])
 
     if max_edits >= 2 and len(pos) >= 2:
         for i, j in itertools.combinations(pos, 2):
-            for repl_i in AMBIGUOUS_FIELD_SUBS[data[i]]:
-                for repl_j in AMBIGUOUS_FIELD_SUBS[data[j]]:
+            for repl_i in substitutions[data[i]]:
+                for repl_j in substitutions[data[j]]:
                     chars = list(data)
                     chars[i] = repl_i
                     chars[j] = repl_j
@@ -311,22 +322,45 @@ def _limited_field_variants(data: str, max_edits: int = 2) -> set[str]:
     return variants
 
 
-def correct_field(data: str, check: str) -> str:
+def _field_correction_key(candidate: str, original: str, field_kind: str) -> tuple:
+    edits = sum(1 for src, dst in zip(original, candidate) if src != dst)
+
+    if field_kind == "document_number":
+        return (
+            -_ambiguous_doc_char_count(candidate),
+            int(bool(candidate) and candidate[0].isalpha()),
+            -edits,
+            candidate,
+        )
+
+    return (-edits, candidate)
+
+
+def correct_field(
+    data: str,
+    check: str,
+    *,
+    substitutions: dict[str, tuple[str, ...]] | None = None,
+    field_kind: str = "generic",
+) -> str:
     data = normalize_mrz(data)
     check = normalize_mrz(check)[:1]
 
     if not data or not check or not check.isdigit():
         return data
 
-    if checksum(data) == check:
+    if checksum(data) == check and field_kind != "document_number":
         return data
 
-    best = data
-    for cand in _limited_field_variants(data, max_edits=2):
-        if checksum(cand) == check:
-            return cand
+    matches = [
+        cand
+        for cand in _limited_field_variants(data, max_edits=2, substitutions=substitutions)
+        if checksum(cand) == check
+    ]
+    if not matches:
+        return data
 
-    return best
+    return max(matches, key=lambda cand: _field_correction_key(cand, data, field_kind))
 
 
 def validate_td3_checks(line2: str) -> dict:
@@ -402,7 +436,12 @@ def validate_and_correct_mrz(line1: str, line2: str) -> tuple[str, str, dict]:
     if len(line2) < MRZ_LINE_LEN:
         return line1, line2, validate_td3_checks(line2)
 
-    doc_number = correct_field(line2[0:9], line2[9])
+    doc_number = correct_field(
+        line2[0:9],
+        line2[9],
+        substitutions=DOC_NUMBER_AMBIGUOUS_SUBS,
+        field_kind="document_number",
+    )
     dob = correct_field(_normalize_numeric_field(line2[13:19]), line2[19])
     expiry = correct_field(_normalize_numeric_field(line2[21:27]), line2[27])
     personal = correct_field(line2[28:42], line2[42])
@@ -669,6 +708,30 @@ def generate_ocr_candidates(line_img, prefix: str):
             })
 
     return candidates
+
+
+def _candidate_support_bonus(support_count: int) -> float:
+    if support_count <= 1:
+        return 0.0
+
+    return math.log2(support_count) * CANDIDATE_SUPPORT_BONUS_SCALE
+
+
+def _apply_candidate_support_bonus(candidates) -> None:
+    support_counts = {}
+    for cand in candidates:
+        text = cand["text"]
+        support_counts[text] = support_counts.get(text, 0) + 1
+
+    for cand in candidates:
+        support_count = support_counts[cand["text"]]
+        support_bonus = _candidate_support_bonus(support_count)
+        base_score = cand["score"]
+
+        cand["base_score"] = base_score
+        cand["support_count"] = support_count
+        cand["support_bonus"] = support_bonus
+        cand["score"] = base_score + support_bonus
 
 
 # -------------------------------------------------------
@@ -1185,6 +1248,8 @@ def run_ocr(mrz_img):
             cand["score"] = score_td3_line1(repaired)
             cand["checksum_pass_count"] = None
 
+        _apply_candidate_support_bonus(line1_candidates)
+
         for cand in line2_candidates:
             text = normalize_td3_line2(cand["text"])
             _, repaired, checks = validate_and_correct_mrz("", text)
@@ -1293,9 +1358,12 @@ def run_ocr(mrz_img):
                 {
                     "text": c["text"],
                     "score": round(c["score"], 2),
+                    "base_score": round(c.get("base_score", c["score"]), 2),
                     "variant_id": c["variant_id"],
                     "psm": c["psm"],
                     "checksum_pass_count": c["checksum_pass_count"],
+                    "support_count": c.get("support_count", 1),
+                    "support_bonus": round(c.get("support_bonus", 0.0), 2),
                 }
                 for c in line1_top
             ],
@@ -1313,10 +1381,16 @@ def run_ocr(mrz_img):
         "selected": {
             "line1": {
                 "score": round(best_pair["line1"]["score"], 2),
+                "base_score": round(
+                    best_pair["line1"].get("base_score", best_pair["line1"]["score"]),
+                    2,
+                ),
                 "text": best_line1,
                 "variant_id": best_pair["line1"]["variant_id"],
                 "psm": best_pair["line1"]["psm"],
                 "variant_meta": best_pair["line1"]["variant_meta"],
+                "support_count": best_pair["line1"].get("support_count", 1),
+                "support_bonus": round(best_pair["line1"].get("support_bonus", 0.0), 2),
             },
             "line2": {
                 "score": round(best_pair["line2"]["score"], 2),
