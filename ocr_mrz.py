@@ -69,7 +69,18 @@ DIGIT_TO_LETTER = {
     "8": "B",
     "6": "G",
 }
+# -------------------------------------------------------
+# LINE-1 TOKEN MICRO-REPAIR
+# -------------------------------------------------------
 
+TOKEN_AMBIGUOUS_SUBS = {
+    "T": ("I",),
+    "I": ("T", "1", "L"),
+    "L": ("I",),
+    "1": ("I", "L"),
+    "0": ("O",),
+    "O": ("0",),
+}
 
 def save(img, filename):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -480,6 +491,195 @@ def _line_variants(line_img: np.ndarray, line_name: str) -> list[dict]:
 # SCORING / REPAIR
 # -------------------------------------------------------
 
+def _longest_alpha_run(text: str) -> int:
+    longest = 0
+    for match in re.finditer(r"[A-Z]+", text):
+        longest = max(longest, len(match.group(0)))
+    return longest
+
+
+def analyze_td3_line1_given_prefix(name_zone: str) -> dict:
+    """
+    Analyze the TD3 line1 name zone (positions 5:44) and estimate the most
+    plausible given-name prefix after the first '<<' delimiter.
+    """
+    info = {
+        "delimiter_found": False,
+        "delimiter_index": -1,
+        "prefix": "",
+        "prefix_start": -1,
+        "prefix_end": -1,
+        "prefix_len": 0,
+        "tail_starts_filler": False,
+        "first_filler_index_in_tail": -1,
+        "trailing_letters": 0,
+        "trailing_noise_letters": 0,
+        "trailing_noise_ratio": 0.0,
+        "longest_trailing_alpha_run": 0,
+        "clean_secondary_token": False,
+        "hallucinated_tail": False,
+    }
+
+    delimiter_index = name_zone.find("<<")
+    if delimiter_index < 0:
+        return info
+
+    info["delimiter_found"] = True
+    info["delimiter_index"] = delimiter_index
+
+    given_zone = name_zone[delimiter_index + 2:]
+    leading_fillers = len(given_zone) - len(given_zone.lstrip("<"))
+    core = given_zone[leading_fillers:]
+    if not core:
+        return info
+
+    lead = re.match(r"^[A-Z]+", core)
+    if not lead:
+        return info
+
+    lead_letters = lead.group(0)
+    upper = min(len(lead_letters), 16)
+    lower = 1 if upper == 1 else 2
+
+    best = None
+    for pref_len in range(lower, upper + 1):
+        prefix = core[:pref_len]
+        tail = core[pref_len:]
+
+        first_filler = tail.find("<")
+        trailing_letters = sum(1 for c in tail if "A" <= c <= "Z")
+        trailing_noise = sum(1 for c in tail if c in "KRETX")
+        noise_ratio = (trailing_noise / trailing_letters) if trailing_letters else 0.0
+        longest_tail_run = _longest_alpha_run(tail)
+
+        vowels = sum(1 for c in prefix if c in "AEIOUY")
+        vowel_ratio = vowels / len(prefix) if prefix else 0.0
+
+        token_score = 0.0
+        if 2 <= pref_len <= 10:
+            token_score += 5.0
+        elif pref_len <= 14:
+            token_score += 2.0
+        else:
+            token_score -= 1.0
+        token_score -= 0.45 * max(0, pref_len - 8)
+
+        if tail.startswith("<"):
+            token_score += 7.0
+        if first_filler >= 0:
+            token_score += max(0.0, 3.5 - (0.8 * first_filler))
+        else:
+            token_score -= 6.0
+
+        token_score -= 0.9 * trailing_letters
+        token_score -= 5.5 * noise_ratio
+        if longest_tail_run >= 6:
+            token_score -= float(longest_tail_run - 5)
+        if re.search(r"<{8,}", tail):
+            token_score += 2.5
+
+        if 0.25 <= vowel_ratio <= 0.8:
+            token_score += 1.5
+        elif pref_len >= 4:
+            token_score -= 1.5
+
+        if prefix[-1] in "AEIOUY":
+            token_score += 0.8
+        if prefix[-1] in "KRXQ":
+            token_score -= 1.2
+
+        pick = (token_score, -trailing_letters, -pref_len)
+        if best is None or pick > best["pick"]:
+            best = {
+                "pick": pick,
+                "prefix": prefix,
+                "prefix_len": pref_len,
+                "tail": tail,
+                "first_filler": first_filler,
+                "trailing_letters": trailing_letters,
+                "trailing_noise": trailing_noise,
+                "noise_ratio": noise_ratio,
+                "longest_tail_run": longest_tail_run,
+            }
+
+    if best is None:
+        return info
+
+    prefix_start = delimiter_index + 2 + leading_fillers
+    prefix_end = prefix_start + best["prefix_len"]
+    tail = best["tail"]
+
+    clean_secondary = bool(re.match(r"^<[A-Z]{2,}(?:<[A-Z]{2,})*<{4,}$", tail))
+    hallucinated_tail = (
+        best["trailing_letters"] >= 3
+        and not clean_secondary
+        and (
+            best["noise_ratio"] >= 0.55
+            or best["longest_tail_run"] >= 6
+            or (best["first_filler"] < 0 and best["trailing_letters"] >= 5)
+        )
+    )
+
+    info.update(
+        {
+            "prefix": best["prefix"],
+            "prefix_start": prefix_start,
+            "prefix_end": prefix_end,
+            "prefix_len": best["prefix_len"],
+            "tail_starts_filler": tail.startswith("<"),
+            "first_filler_index_in_tail": best["first_filler"],
+            "trailing_letters": best["trailing_letters"],
+            "trailing_noise_letters": best["trailing_noise"],
+            "trailing_noise_ratio": best["noise_ratio"],
+            "longest_trailing_alpha_run": best["longest_tail_run"],
+            "clean_secondary_token": clean_secondary,
+            "hallucinated_tail": hallucinated_tail,
+        }
+    )
+    return info
+
+
+def collapse_td3_line1_given_noise(name_zone: str, analysis: dict) -> tuple[str, bool]:
+    """
+    Collapse random alphabetic garbage after the plausible given-name prefix
+    into MRZ filler characters '<'.
+    """
+    if not analysis.get("delimiter_found"):
+        return name_zone, False
+    if not analysis.get("prefix"):
+        return name_zone, False
+
+    prefix_end = analysis.get("prefix_end", -1)
+    if prefix_end <= 0 or prefix_end >= len(name_zone):
+        return name_zone, False
+
+    tail = name_zone[prefix_end:]
+    trailing_letters = sum(1 for c in tail if "A" <= c <= "Z")
+    trailing_noise = sum(1 for c in tail if c in "KRETX")
+    noise_ratio = (trailing_noise / trailing_letters) if trailing_letters else 0.0
+
+    should_collapse = False
+    if analysis.get("hallucinated_tail"):
+        should_collapse = True
+    elif trailing_letters >= 8 and not analysis.get("clean_secondary_token"):
+        should_collapse = True
+    elif (
+        trailing_letters >= 4
+        and not analysis.get("tail_starts_filler")
+        and noise_ratio >= 0.45
+        and not analysis.get("clean_secondary_token")
+    ):
+        should_collapse = True
+
+    if not should_collapse:
+        return name_zone, False
+
+    cleaned_tail = re.sub(r"[A-Z0-9]", "<", tail)
+    if cleaned_tail == tail:
+        return name_zone, False
+    return name_zone[:prefix_end] + cleaned_tail, True
+
+
 def score_td3_line1(line1: str) -> tuple[float, dict]:
     line = normalize_td3_line1(line1)
     score = 0.0
@@ -521,9 +721,64 @@ def score_td3_line1(line1: str) -> tuple[float, dict]:
         score += 4
     if given_ok:
         score += 4
+
+    given_analysis = analyze_td3_line1_given_prefix(name_zone)
+    prefix = given_analysis["prefix"]
+    prefix_len = given_analysis["prefix_len"]
+    trailing_letters = given_analysis["trailing_letters"]
+    trailing_noise = given_analysis["trailing_noise_letters"]
+
+    if prefix_len >= 2:
+        score += 6
+    if 2 <= prefix_len <= 10:
+        score += 7
+    elif prefix_len > 12:
+        score -= (prefix_len - 12) * 0.8
+
+    if given_analysis["tail_starts_filler"]:
+        score += 14
+    elif given_analysis["delimiter_found"] and prefix_len > 0:
+        score -= 4
+
+    score -= 1.4 * trailing_letters
+    if trailing_letters:
+        score -= 5.0 * given_analysis["trailing_noise_ratio"]
+
+    if given_analysis["longest_trailing_alpha_run"] >= 6:
+        score -= (given_analysis["longest_trailing_alpha_run"] - 5) * 1.5
+
+    if trailing_letters == 0 and prefix_len >= 2:
+        score += 8
+    if given_analysis["clean_secondary_token"]:
+        score += 2.5
+    if given_analysis["hallucinated_tail"]:
+        score -= 8
+
+    if prefix:
+        vowels = sum(1 for c in prefix if c in "AEIOUY")
+        vowel_ratio = vowels / len(prefix)
+        if 0.25 <= vowel_ratio <= 0.8:
+            score += 2
+        else:
+            score -= 1.5
+        if prefix[-1] in "AEIOUY":
+            score += 1.2
+        if prefix[-1] in "KRXQ":
+            score -= 1.8
+        if re.search(r"[BCDFGHJKLMNPQRSTVWXZ]{4,}", prefix):
+            score -= 2.5
+        details["given_prefix_vowel_ratio"] = round(vowel_ratio, 3)
+
     details["has_delimiter"] = "<<" in name_zone
     details["surname_like"] = surname_ok
     details["given_like"] = given_ok
+    details["given_prefix"] = prefix
+    details["given_prefix_len"] = prefix_len
+    details["given_tail_starts_filler"] = given_analysis["tail_starts_filler"]
+    details["given_trailing_letters"] = trailing_letters
+    details["given_trailing_noise_letters"] = trailing_noise
+    details["given_trailing_noise_ratio"] = round(given_analysis["trailing_noise_ratio"], 3)
+    details["given_hallucinated_tail"] = given_analysis["hallucinated_tail"]
 
     return score, details
 
@@ -777,14 +1032,39 @@ def repair_td3_line1(line1: str, fallback_country: str | None = None) -> tuple[s
 
     first_delim = name_zone.find("<<")
     if first_delim >= 0:
-        left = name_zone[:first_delim]
-        right = name_zone[first_delim + 2:]
-        right_clean = re.sub(r"[A-Z0-9](?=<{5,})", "<", right)
-        right_clean = re.sub(r"<{3,}", "<<", right_clean)
-        repaired = left + "<<" + right_clean
+        analysis = analyze_td3_line1_given_prefix(name_zone)
+        repaired, collapsed = collapse_td3_line1_given_noise(name_zone, analysis)
+        if collapsed:
+            repairs.append(
+                {
+                    "field": "line1",
+                    "position": "name",
+                    "from": name_zone,
+                    "to": repaired,
+                    "reason": "collapse_given_name_filler_noise",
+                }
+            )
+            name_zone = repaired
+            analysis = analyze_td3_line1_given_prefix(name_zone)
+
+        # If noise remains after the best prefix and there is no clean secondary token,
+        # force the suffix to filler for a stricter TD3-like shape.
+        if analysis["prefix"] and not analysis["clean_secondary_token"] and analysis["trailing_letters"] > 0:
+            suffix_start = analysis["prefix_end"]
+            forced = name_zone[:suffix_start] + re.sub(r"[A-Z0-9]", "<", name_zone[suffix_start:])
+            repaired = forced
+        else:
+            repaired = name_zone
+
         if repaired != name_zone:
             repairs.append(
-                {"field": "line1", "position": "name", "from": name_zone, "to": repaired, "reason": "name_noise_collapse"}
+                {
+                    "field": "line1",
+                    "position": "name",
+                    "from": name_zone,
+                    "to": repaired,
+                    "reason": "given_name_suffix_filler_enforce",
+                }
             )
             name_zone = repaired
 

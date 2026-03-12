@@ -4,7 +4,8 @@ PDF → aligned document image → detected & cropped MRZ strip
 
 Runs both stages in sequence:
     Stage 1 (preprocess_passport): input load/render → contour detection → perspective warp
-  Stage 2 (detect_mrz):          blackhat → gradient → threshold → MRZ crop
+    Stage 2 (detect_mrz):          blackhat → gradient → threshold → MRZ crop
+    Stage 3 (ocr_mrz):             MRZ cleaning → OCR → parsing/reporting
 
 Usage:
     python run_pipeline.py <path/to/passport.pdf>
@@ -26,20 +27,28 @@ Output (all saved to output/):
 import os
 import sys
 import cv2
-from env_utils import load_env_file
 
+from env_utils import load_env_file
 
 load_env_file()
 
+USE_FACE_HINT = os.getenv("USE_FACE_HINT", "True").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # ---------------------------------------------------------------------------
-# Import both stages.  Each module is self-contained; we call their functions
+# Import both stages. Each module is self-contained; we call their functions
 # individually rather than running them as scripts, so we can pass data
 # directly between stages without touching disk mid-pipeline.
 # ---------------------------------------------------------------------------
 
 import preprocess_passport as stage1
-import detect_mrz          as stage2
-import ocr_mrz             as stage3
+import detect_mrz as stage2
+import ocr_mrz as stage3
+
 from face_detection import orient_with_face_hint, extract_face_crop, draw_face_box
 from mrz_rotation import detect_mrz_with_rotation_fallback
 from report_utils import write_pipeline_report, parse_mrz_td3
@@ -76,7 +85,7 @@ def build_output_prefix(input_path: str) -> str:
     stem = os.path.splitext(os.path.basename(input_path))[0].strip()
     if not stem:
         return "input"
-    # Keep names filesystem-safe and readable.
+
     safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in stem)
     return safe
 
@@ -88,6 +97,7 @@ def main() -> None:
     base_output_dir = os.getenv("OUTPUT_DIR", stage1.OUTPUT_DIR)
     output_prefix = build_output_prefix(input_path)
     output_dir = os.path.join(base_output_dir, output_prefix)
+
     stage1.OUTPUT_DIR = output_dir
     stage2.OUTPUT_DIR = output_dir
     stage3.OUTPUT_DIR = output_dir
@@ -162,8 +172,22 @@ def main() -> None:
     stage1.save(aligned, "aligned_passport.png")
 
     # Face-based orientation hint + face extraction for downstream checks.
-    face_result = orient_with_face_hint(aligned)
-    aligned_for_stage2 = face_result["image"]
+    # Always initialise a default result so the rest of the pipeline works
+    # even when face hinting is disabled.
+    face_result = {
+        "image": aligned,
+        "label": "original",
+        "faces_count": 0,
+        "face_bbox": None,
+    }
+
+    if USE_FACE_HINT:
+        face_result = orient_with_face_hint(aligned)
+        aligned_for_stage2 = face_result["image"]
+    else:
+        aligned_for_stage2 = aligned
+        print("[Stage 1] Face hint disabled via USE_FACE_HINT=False")
+
     if face_result["label"] != "original":
         print(f"[Stage 1] Face-based orientation hint applied: {face_result['label']}")
         stage1.save(aligned_for_stage2, "aligned_passport.png")
@@ -175,13 +199,18 @@ def main() -> None:
         face_crop = extract_face_crop(aligned_for_stage2, face_result["face_bbox"])
         if face_crop is not None and face_crop.size > 0:
             stage1.save(face_crop, "face_crop.png")
+
         face_annotated = draw_face_box(aligned_for_stage2, face_result["face_bbox"])
         stage1.save(face_annotated, "face_detected.png")
+
         report["face"]["detected"] = True
         report["face"]["bbox"] = [int(v) for v in face_result["face_bbox"]]
         print(f"[Stage 1] Face detected (count={face_result['faces_count']}).")
     else:
-        print("[Stage 1] No face detected; continuing with MRZ-based orientation fallback.")
+        if USE_FACE_HINT:
+            print("[Stage 1] No face detected; continuing with MRZ-based orientation fallback.")
+        else:
+            print("[Stage 1] Face detection skipped; continuing with MRZ-based orientation fallback.")
 
     print("\n[Stage 1] Complete.\n")
 
@@ -192,9 +221,7 @@ def main() -> None:
     print("STAGE 2 — MRZ region detection")
     print("=" * 60)
 
-    detection_result = detect_mrz_with_rotation_fallback(
-        aligned_for_stage2,
-    )
+    detection_result = detect_mrz_with_rotation_fallback(aligned_for_stage2)
 
     if not detection_result:
         report["status"] = "failed"
@@ -210,6 +237,7 @@ def main() -> None:
         sys.exit(1)
 
     working_aligned, mrz_lines, mrz_bbox, used_orientation = detection_result
+
     if used_orientation != "original":
         print(f"[Stage 2] MRZ found after orientation correction: {used_orientation}")
         stage1.save(working_aligned, "aligned_passport.png")
@@ -221,7 +249,7 @@ def main() -> None:
     report["mrz"]["bbox"] = [int(v) for v in mrz_bbox]
     report["mrz"]["line_bboxes"] = [[int(v) for v in bbox] for bbox in mrz_lines]
 
-    # Step 7 — Merge the two line bboxes and crop
+    # Step 7 — Merge the line bboxes and crop
     mrz_crop = stage2.crop_mrz(working_aligned, mrz_bbox)
     stage2.save(mrz_crop, "mrz_region.png")
 
@@ -238,19 +266,17 @@ def main() -> None:
     print("STAGE 3 — MRZ OCR")
     print("=" * 60)
 
-    # mrz_crop is BGR from Stage 2; pass directly to clean_mrz_image
-    # (it handles upscale + grayscale + threshold internally)
-
-    # Step 1 — Clean (upscale → gray → blur → Otsu)
+    # Step 1 — Clean preview/debug image
     mrz_clean = stage3.clean_mrz_image(mrz_crop)
     stage3.save(mrz_clean, "mrz_clean.png")
 
-    # Step 2 — Tesseract OCR on original crop
+    # Step 2 — OCR + parsing
     ocr_result = stage3.run_ocr(mrz_crop)
 
     line1 = ""
     line2 = ""
     ocr_meta = {}
+
     if isinstance(ocr_result, tuple) and len(ocr_result) >= 2:
         line1, line2 = ocr_result[0], ocr_result[1]
         if len(ocr_result) >= 3 and isinstance(ocr_result[2], dict):
@@ -283,6 +309,7 @@ def main() -> None:
     print("=" * 60)
     print("PIPELINE COMPLETE")
     print("=" * 60)
+
     out = os.path.abspath(stage1.OUTPUT_DIR)
     print(f"  aligned passport : {out}\\aligned_passport.png")
     print(f"  MRZ region       : {out}\\mrz_region.png")
