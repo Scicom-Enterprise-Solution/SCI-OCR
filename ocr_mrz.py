@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import itertools
 import cv2
 import pytesseract
@@ -13,38 +14,127 @@ load_env_file()
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output")
 
 # -------------------------------------------------------
-# TESSERACT PATH (Windows)
+# TESSERACT RESOLUTION
 # -------------------------------------------------------
 
-paths = [
+WINDOWS_TESSERACT_PATHS = [
     r"C:\Program Files\Tesseract-OCR\tesseract.exe",
     r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
 ]
 
-env_tesseract_cmd = os.getenv("TESSERACT_CMD")
+def _resolve_tesseract_cmd() -> str | None:
+    env_tesseract_cmd = os.getenv("TESSERACT_CMD", "").strip()
+    candidates = []
 
-if env_tesseract_cmd and os.path.isfile(env_tesseract_cmd):
-    pytesseract.pytesseract.tesseract_cmd = env_tesseract_cmd
-elif env_tesseract_cmd:
-    print(f"[WARN] TESSERACT_CMD is set but file not found: {env_tesseract_cmd}")
+    if env_tesseract_cmd:
+        candidates.append(env_tesseract_cmd)
 
-if (
-    not getattr(pytesseract.pytesseract, "tesseract_cmd", "")
-    or not os.path.isfile(pytesseract.pytesseract.tesseract_cmd)
-):
-    for p in paths:
-        if os.path.isfile(p):
-            pytesseract.pytesseract.tesseract_cmd = p
-            break
+    candidates.append("tesseract")
+
+    if os.name == "nt":
+        candidates.extend(WINDOWS_TESSERACT_PATHS)
+
+    for candidate in candidates:
+        expanded = os.path.expandvars(os.path.expanduser(candidate))
+        resolved = shutil.which(expanded)
+        if resolved:
+            return resolved
+
+    if env_tesseract_cmd:
+        print(f"[WARN] TESSERACT_CMD not found: {env_tesseract_cmd}")
+
+    return None
+
+
+resolved_tesseract_cmd = _resolve_tesseract_cmd()
+if resolved_tesseract_cmd:
+    pytesseract.pytesseract.tesseract_cmd = resolved_tesseract_cmd
 
 
 MRZ_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
 MRZ_LINE_LEN = 44
+TESSERACT_LANG = os.getenv("TESSERACT_LANG", "eng").strip() or "eng"
+
+
+def _parse_int_list_env(name: str, default: list[int]) -> list[int]:
+    raw = os.getenv(name, "")
+    if not raw.strip():
+        return default[:]
+
+    values = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            values.append(int(token))
+        except ValueError:
+            print(f"[WARN] Ignoring invalid integer in {name}: {token}")
+
+    return values or default[:]
+
+
+def _legacy_oem_supported(lang: str) -> bool:
+    probe = np.full((24, 96), 255, dtype=np.uint8)
+
+    try:
+        pytesseract.image_to_string(
+            probe,
+            lang=lang,
+            config=(
+                "--oem 0 --psm 10 "
+                "-c tessedit_char_whitelist=A "
+                "-c load_system_dawg=0 "
+                "-c load_freq_dawg=0"
+            ),
+        )
+        return True
+    except pytesseract.TesseractError as exc:
+        message = str(exc).lower()
+        if "legacy" in message and "components are not present" in message:
+            return False
+        print(f"[WARN] Could not validate legacy OCR support for '{lang}': {exc}")
+        return False
+
+
+def _resolve_oems(lang: str) -> list[int]:
+    requested = _parse_int_list_env("TESSERACT_OEMS", [1])
+    resolved = []
+    legacy_checked = False
+    legacy_supported = False
+
+    for oem in requested:
+        if oem not in (0, 1, 2, 3):
+            print(f"[WARN] Ignoring unsupported TESSERACT_OEMS value: {oem}")
+            continue
+
+        if oem in (0, 2):
+            if not legacy_checked:
+                legacy_supported = _legacy_oem_supported(lang)
+                legacy_checked = True
+            if not legacy_supported:
+                print(
+                    f"[WARN] Skipping OEM {oem} for '{lang}' because legacy components are not available"
+                )
+                continue
+
+        if oem not in resolved:
+            resolved.append(oem)
+
+    if resolved:
+        return resolved
+
+    print("[WARN] No usable Tesseract OEM configured; falling back to OEM 1")
+    return [1]
+
+
+TESSERACT_PSMS = _parse_int_list_env("TESSERACT_PSMS", [7, 6, 13])
+TESSERACT_OEMS = _resolve_oems(TESSERACT_LANG)
 
 OCR_CONFIGS = [
-    {"psm": 7, "cfg": "--oem 1 --psm 7"},
-    {"psm": 6, "cfg": "--oem 1 --psm 6"},
-    {"psm": 13, "cfg": "--oem 1 --psm 13"},
+    {"oem": oem, "psm": psm, "cfg": f"--oem {oem} --psm {psm}"}
+    for oem in TESSERACT_OEMS
+    for psm in TESSERACT_PSMS
 ]
 
 AMBIGUOUS_FIELD_SUBS = {
@@ -69,6 +159,8 @@ TOKEN_AMBIGUOUS_SUBS = {
     "I": ("T",),
     "L": ("I",),
 }
+
+MIN_TOKEN_REPAIR_SCORE_GAIN = 6.0
 
 COMMON_COUNTRIES = {
     "PAK", "IND", "BGD", "USA", "GBR", "CAN", "AUS", "ARE", "SAU", "MYS",
@@ -124,6 +216,10 @@ def _sanitize_alpha(text: str) -> str:
 
 def _sanitize_name_token(token: str) -> str:
     return _sanitize_alpha(token)
+
+
+def _sanitize_name_zone(value: str) -> str:
+    return re.sub(r"[^A-Z<]", "", normalize_mrz(value))
 
 
 # -------------------------------------------------------
@@ -491,6 +587,7 @@ def build_split_candidates(gray, base_meta: dict):
 def _ocr_image(img, cfg: str) -> str:
     text = pytesseract.image_to_string(
         img,
+        lang=TESSERACT_LANG,
         config=(
             f"{cfg} "
             f"-c tessedit_char_whitelist={MRZ_WHITELIST} "
@@ -741,13 +838,29 @@ def _generate_token_variants(token: str, max_edits: int = 2) -> set[str]:
     return {v for v in variants if v}
 
 
-def _build_td3_line1(issuing_country: str, surname: str, given_token: str) -> str:
+def _split_given_name_zone(given_raw: str) -> tuple[str, str]:
+    raw_first, sep, raw_tail = given_raw.partition("<")
+    given_token = _sanitize_name_token(raw_first)
+    given_tail = _sanitize_name_zone(sep + raw_tail) if sep else ""
+    return given_token, given_tail
+
+
+def _build_td3_line1(
+    issuing_country: str,
+    surname: str,
+    given_token: str,
+    given_tail: str = "",
+) -> str:
     issuing_country = re.sub(r"[^A-Z<]", "", (issuing_country or ""))
     issuing_country = issuing_country[:3].ljust(3, "<")
     surname = _sanitize_name_token(surname)
     given_token = _sanitize_name_token(given_token)
+    given_tail = _sanitize_name_zone(given_tail)
 
-    rebuilt = f"P<{issuing_country}{surname}<<{given_token}"
+    if given_tail and not given_tail.startswith("<"):
+        given_tail = "<" + given_tail
+
+    rebuilt = f"P<{issuing_country}{surname}<<{given_token}{given_tail}"
     return rebuilt[:MRZ_LINE_LEN].ljust(MRZ_LINE_LEN, "<")
 
 
@@ -755,6 +868,8 @@ def repair_given_name_token(token: str) -> tuple[str, dict]:
     raw = _sanitize_name_token(token)
     if not raw:
         return raw, {"changed": False, "from": token, "to": raw, "reason": "empty"}
+
+    raw_score = _name_token_score(raw)
 
     candidates = {
         c for c in _generate_token_variants(raw, max_edits=2)
@@ -769,6 +884,10 @@ def repair_given_name_token(token: str) -> tuple[str, dict]:
     )
 
     best, best_score = ranked[0]
+    if best != raw and best_score < raw_score + MIN_TOKEN_REPAIR_SCORE_GAIN:
+        best = raw
+        best_score = raw_score
+
     changed = best != raw
 
     return best, {
@@ -796,34 +915,19 @@ def repair_td3_line1(line1: str) -> tuple[str, list[dict]]:
 
     surname_raw, given_raw = name_zone.split("<<", 1)
     surname = _sanitize_name_token(surname_raw)
-
-    raw_first = given_raw.split("<", 1)[0]
-    given_token = _sanitize_name_token(raw_first)
+    given_token, given_tail = _split_given_name_zone(given_raw)
 
     if not surname:
         return line, repairs
 
-    trimmed_token = given_token
-    if len(trimmed_token) >= 5 and trimmed_token[-1] in {"K", "R", "T"}:
-        shorter = trimmed_token[:-1]
-        if _name_token_score(shorter) > _name_token_score(trimmed_token):
-            repairs.append({
-                "field": "line1",
-                "position": "given_name_token",
-                "from": trimmed_token,
-                "to": shorter,
-                "reason": "trim_suspected_trailing_noise",
-            })
-            given_token = shorter
-
-    rebuilt = _build_td3_line1(issuing_country, surname, given_token)
+    rebuilt = _build_td3_line1(issuing_country, surname, given_token, given_tail)
 
     if rebuilt != line:
         repairs.append({
             "field": "line1",
             "position": "name",
             "from": name_zone,
-            "to": f"{surname}<<{given_token}",
+            "to": f"{surname}<<{given_token}{given_tail}",
             "reason": "name_noise_collapse",
         })
 
@@ -832,7 +936,7 @@ def repair_td3_line1(line1: str) -> tuple[str, list[dict]]:
     if 3 <= len(given_token) <= 8:
         repaired_token, meta = repair_given_name_token(given_token)
         if meta["changed"]:
-            rebuilt2 = _build_td3_line1(issuing_country, surname, repaired_token)
+            rebuilt2 = _build_td3_line1(issuing_country, surname, repaired_token, given_tail)
             repairs.append({
                 "field": "line1",
                 "position": "given_name_token",

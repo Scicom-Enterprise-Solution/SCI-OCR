@@ -9,9 +9,10 @@ This project extracts Machine Readable Zone (MRZ) text from a passport PDF in 3 
 ## Requirements
 
 - Python 3.10+
-- Tesseract OCR installed on Windows:
-  - C:\Program Files\Tesseract-OCR\tesseract.exe
-  - or C:\Program Files (x86)\Tesseract-OCR\tesseract.exe
+- Tesseract OCR installed and available on `PATH`
+- Oracle Linux 9 example: `sudo dnf install -y tesseract tesseract-langpack-eng`
+- Note: Oracle Linux's packaged `eng` data is LSTM-only here, so legacy OEM modes `0` and `2` are not available unless you install a legacy-capable traineddata file manually.
+- Optional MRZ improvement: install `ocrb.traineddata` and set `TESSERACT_LANG=eng+ocrb` or `ocrb`
 
 Install Python packages:
 
@@ -23,9 +24,13 @@ pip install -r requirements.txt
 
 The project loads values from `.env` automatically (if present).
 
-- `TESSERACT_CMD` - Full path to `tesseract.exe`
+- `TESSERACT_CMD` - Optional command name or full path to the Tesseract executable. If unset, the code uses `tesseract` from `PATH`.
+- `TESSERACT_LANG` - Optional Tesseract language(s), for example `eng` or `eng+ocrb`
+- `TESSERACT_OEMS` - Optional comma-separated OEM list, for example `1` or `0,1`. Legacy OEMs require legacy-capable traineddata.
 - `PDF_PATH` - Default PDF path used when no CLI argument is provided
 - `OUTPUT_DIR` - Output folder for generated images
+
+For better MRZ accuracy, an OCR-B model can be added manually to the Tesseract tessdata directory. In this environment, `ocrb.traineddata` was installed and the local `.env` uses `eng+ocrb`.
 
 Template:
 
