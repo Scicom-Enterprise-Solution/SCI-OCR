@@ -7,6 +7,7 @@ import pytesseract
 import numpy as np
 
 from env_utils import load_env_file
+from mrz_country_codes import is_valid_mrz_country_code
 
 
 load_env_file()
@@ -160,12 +161,16 @@ TOKEN_AMBIGUOUS_SUBS = {
     "L": ("I",),
 }
 
-MIN_TOKEN_REPAIR_SCORE_GAIN = 6.0
-
-COMMON_COUNTRIES = {
-    "PAK", "IND", "BGD", "USA", "GBR", "CAN", "AUS", "ARE", "SAU", "MYS",
-    "SGP", "QAT", "KWT", "OMN", "DEU", "FRA", "ITA", "ESP", "NLD"
+COUNTRY_CODE_AMBIGUOUS_SUBS = {
+    "0": ("O", "Q"),
+    "1": ("I",),
+    "2": ("Z",),
+    "5": ("S",),
+    "6": ("G",),
+    "8": ("B",),
 }
+
+MIN_TOKEN_REPAIR_SCORE_GAIN = 6.0
 
 PAIR_COUNTRY_MATCH_BONUS = 10.0
 
@@ -197,7 +202,9 @@ def normalize_td3_line1(text: str) -> str:
     text = normalize_mrz(text)
 
     if not text.startswith("P<"):
-        if text.startswith("PK"):
+        if text.startswith(("PO", "P0")):
+            text = "P<" + text[2:]
+        elif text.startswith("PK"):
             text = "P<" + text[2:]
         elif text.startswith("P"):
             text = "P<" + text[1:]
@@ -222,6 +229,21 @@ def _sanitize_name_token(token: str) -> str:
 
 def _sanitize_name_zone(value: str) -> str:
     return re.sub(r"[^A-Z<]", "", normalize_mrz(value))
+
+
+def _generate_country_code_variants(code: str) -> set[str]:
+    code = normalize_mrz(code).replace("<", "")[:3]
+    if len(code) != 3:
+        return set()
+
+    variants = {code}
+    for i, ch in enumerate(code):
+        for repl in COUNTRY_CODE_AMBIGUOUS_SUBS.get(ch, ()):
+            candidate = code[:i] + repl + code[i + 1:]
+            if re.fullmatch(r"[A-Z]{3}", candidate):
+                variants.add(candidate)
+
+    return variants
 
 
 # -------------------------------------------------------
@@ -709,8 +731,10 @@ def score_td3_line1(text: str) -> float:
     issuing = text[2:5]
     if re.fullmatch(r"[A-Z<]{3}", issuing):
         score += 12
-        if issuing in COMMON_COUNTRIES:
-            score += 4
+        if is_valid_mrz_country_code(issuing):
+            score += 10
+        else:
+            score -= 8
     else:
         score -= 12
 
@@ -767,8 +791,10 @@ def score_td3_line2(text: str) -> tuple[float, dict]:
     nationality = text[10:13]
     if re.fullmatch(r"[A-Z<]{3}", nationality):
         score += 10
-        if nationality in COMMON_COUNTRIES:
-            score += 4
+        if is_valid_mrz_country_code(nationality):
+            score += 10
+        else:
+            score -= 8
     else:
         score -= 10
 
@@ -815,7 +841,8 @@ def pair_consistency_bonus(line1: str, line2: str) -> float:
     nationality = line2[10:13]
 
     if (
-        re.fullmatch(r"[A-Z]{3}", issuing_country)
+        is_valid_mrz_country_code(issuing_country)
+        and is_valid_mrz_country_code(nationality)
         and issuing_country == nationality
     ):
         return PAIR_COUNTRY_MATCH_BONUS
@@ -914,12 +941,62 @@ def repair_given_name_token(token: str) -> tuple[str, dict]:
     }
 
 
+def repair_issuing_country_code(line1: str) -> tuple[str, dict | None]:
+    line = normalize_td3_line1(line1)
+
+    if not line.startswith("P<"):
+        return line, None
+
+    issuing_country = line[2:5]
+    if is_valid_mrz_country_code(issuing_country):
+        return line, None
+
+    shifted_country = line[3:6]
+    if is_valid_mrz_country_code(shifted_country):
+        repaired = normalize_td3_line1(line[:2] + line[3:])
+        return repaired, {
+            "field": "line1",
+            "position": "issuing_country",
+            "from": issuing_country,
+            "to": shifted_country,
+            "reason": "drop_noise_before_country_code",
+        }
+
+    valid_variants = [
+        candidate
+        for candidate in _generate_country_code_variants(issuing_country)
+        if is_valid_mrz_country_code(candidate)
+    ]
+    if not valid_variants:
+        return line, None
+
+    best_country = max(
+        valid_variants,
+        key=lambda candidate: (
+            score_td3_line1(line[:2] + candidate + line[5:]),
+            candidate,
+        ),
+    )
+    repaired = normalize_td3_line1(line[:2] + best_country + line[5:])
+    return repaired, {
+        "field": "line1",
+        "position": "issuing_country",
+        "from": issuing_country,
+        "to": best_country,
+        "reason": "country_code_ambiguity_repair",
+    }
+
+
 def repair_td3_line1(line1: str) -> tuple[str, list[dict]]:
     repairs = []
     line = normalize_td3_line1(line1)
 
     if not line.startswith("P<"):
         return line, repairs
+
+    line, country_repair = repair_issuing_country_code(line)
+    if country_repair is not None:
+        repairs.append(country_repair)
 
     issuing_country = line[2:5]
     name_zone = line[5:]

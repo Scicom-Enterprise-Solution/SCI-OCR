@@ -1,15 +1,23 @@
 import unittest
 
 from ocr_mrz import (
+    is_valid_mrz_country_code,
     normalize_td3_line1,
     pair_consistency_bonus,
     repair_given_name_token,
+    repair_issuing_country_code,
     repair_td3_line1,
+    score_td3_line1,
     validate_td3_checks,
 )
 
 
 class TestLine1Repair(unittest.TestCase):
+    def test_normalize_td3_line1_collapses_po_prefix_to_passport_prefix(self) -> None:
+        line = normalize_td3_line1("POJORALMOUSA<<AWS<WAJDI<FAROUR<<<<<<<<<<<<<")
+
+        self.assertEqual(line[:5], "P<JOR")
+
     def test_preserves_valid_name_ending_in_t(self) -> None:
         line = normalize_td3_line1("P<PAKALAM<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<")
 
@@ -31,6 +39,24 @@ class TestLine1Repair(unittest.TestCase):
 
         self.assertEqual(repaired, "SHAHADAT")
         self.assertFalse(meta["changed"])
+
+    def test_repairs_noise_before_country_code(self) -> None:
+        repaired, meta = repair_issuing_country_code(
+            "P<SJORALMOUSA<<AWS<WAJDI<FAROUR<<<<<<<<<<<<<"
+        )
+
+        self.assertEqual(repaired[:5], "P<JOR")
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta["reason"], "drop_noise_before_country_code")
+
+    def test_score_prefers_valid_issuing_country_code(self) -> None:
+        valid = score_td3_line1("P<JORALMOUSA<<AWS<WAJDI<FAROUR<<<<<<<<<<<<<")
+        invalid = score_td3_line1("P<SJORALMOUSA<<AWS<WAJDI<FAROUR<<<<<<<<<<<<<")
+
+        self.assertGreater(valid, invalid)
+
+    def test_accepts_uto_mrz_country_code(self) -> None:
+        self.assertTrue(is_valid_mrz_country_code("UTO"))
 
 
 class TestLine2Checks(unittest.TestCase):
