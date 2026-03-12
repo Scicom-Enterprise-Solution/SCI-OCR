@@ -442,6 +442,48 @@ def split_mrz_lines(img):
     return line1, line2, meta
 
 
+def split_mrz_lines_at(gray, split_y: int):
+    h = gray.shape[0]
+    split_y = max(8, min(h - 8, int(split_y)))
+    line1 = gray[:split_y, :]
+    line2 = gray[split_y:, :]
+    return line1, line2
+
+
+def build_split_candidates(gray, base_meta: dict):
+    h = gray.shape[0]
+    proj_y = int(base_meta.get("split_y", h // 2))
+    half_y = h // 2
+
+    candidates = []
+    seen = set()
+
+    for label, y in [
+        ("projection", proj_y),
+        ("half", half_y),
+        ("projection_m4", proj_y - 4),
+        ("projection_p4", proj_y + 4),
+        ("projection_m8", proj_y - 8),
+        ("projection_p8", proj_y + 8),
+    ]:
+        y = max(8, min(h - 8, y))
+        if y in seen:
+            continue
+        seen.add(y)
+
+        top_ratio = y / h
+        bottom_ratio = (h - y) / h
+
+        candidates.append({
+            "label": label,
+            "split_y": y,
+            "top_ratio": top_ratio,
+            "bottom_ratio": bottom_ratio,
+        })
+
+    return candidates
+
+
 # -------------------------------------------------------
 # OCR
 # -------------------------------------------------------
@@ -648,6 +690,28 @@ def score_td3_line2(text: str) -> tuple[float, dict]:
     return score, checks
 
 
+def score_split_quality(split_info, best_line2_checks, best_line2_score):
+    score = 0.0
+
+    passed = best_line2_checks.get("passed_count", 0)
+    score += passed * 40.0
+
+    if best_line2_checks.get("composite_valid"):
+        score += 25.0
+
+    bottom_ratio = split_info["bottom_ratio"]
+
+    if bottom_ratio < 0.28:
+        score -= 25
+    elif bottom_ratio < 0.33:
+        score -= 10
+    elif 0.35 <= bottom_ratio <= 0.55:
+        score += 10
+
+    score += best_line2_score
+    return score
+
+
 # -------------------------------------------------------
 # LINE-1 REPAIR
 # -------------------------------------------------------
@@ -852,89 +916,111 @@ def run_ocr(mrz_img):
     th_adaptive = _adaptive_thresh(_resize(gray, 3))
     save(th_adaptive, "mrz_thresh_adaptive.png")
 
-    line1_img, line2_img, split_meta = split_mrz_lines(gray)
-    save(line1_img, "mrz_line1.png")
-    save(line2_img, "mrz_line2.png")
+    line1_img_base, line2_img_base, split_meta = split_mrz_lines(gray)
 
-    line1_candidates = generate_ocr_candidates(line1_img, "line1")
-    line2_candidates = generate_ocr_candidates(line2_img, "line2")
+    split_candidates = build_split_candidates(gray, split_meta)
+    best_split_bundle = None
 
-    for cand in line1_candidates:
-        text = normalize_td3_line1(cand["text"])
-        repaired, repairs = repair_td3_line1(text)
-        cand["text"] = repaired
-        cand["repairs"] = repairs
-        cand["score"] = score_td3_line1(repaired)
-        cand["checksum_pass_count"] = None
+    for split_info in split_candidates:
+        split_y = split_info["split_y"]
+        line1_img, line2_img = split_mrz_lines_at(gray, split_y)
 
-    for cand in line2_candidates:
-        text = normalize_td3_line2(cand["text"])
-        _, repaired, checks = validate_and_correct_mrz("", text)
-        cand["text"] = repaired
-        cand["checks"] = checks
-        cand["score"] = score_td3_line2(repaired)[0]
-        cand["checksum_pass_count"] = checks["passed_count"]
+        line1_candidates = generate_ocr_candidates(line1_img, f"line1_{split_info['label']}")
+        line2_candidates = generate_ocr_candidates(line2_img, f"line2_{split_info['label']}")
 
-    if not line1_candidates:
-        line1_candidates = [{
-            "text": "".ljust(MRZ_LINE_LEN, "<"),
-            "variant_id": "none",
-            "variant_meta": {},
-            "psm": 7,
-            "repairs": [],
-            "score": -999.0,
-            "checksum_pass_count": None,
-            "image": line1_img,
-        }]
+        for cand in line1_candidates:
+            text = normalize_td3_line1(cand["text"])
+            repaired, repairs = repair_td3_line1(text)
+            cand["text"] = repaired
+            cand["repairs"] = repairs
+            cand["score"] = score_td3_line1(repaired)
+            cand["checksum_pass_count"] = None
 
-    if not line2_candidates:
-        empty2 = "".ljust(MRZ_LINE_LEN, "<")
-        _, repaired2, checks2 = validate_and_correct_mrz("", empty2)
-        line2_candidates = [{
-            "text": repaired2,
-            "variant_id": "none",
-            "variant_meta": {},
-            "psm": 7,
-            "checks": checks2,
-            "score": -999.0,
-            "checksum_pass_count": checks2["passed_count"],
-            "image": line2_img,
-        }]
+        for cand in line2_candidates:
+            text = normalize_td3_line2(cand["text"])
+            _, repaired, checks = validate_and_correct_mrz("", text)
+            cand["text"] = repaired
+            cand["checks"] = checks
+            cand["score"] = score_td3_line2(repaired)[0]
+            cand["checksum_pass_count"] = checks["passed_count"]
 
-    line1_top = _pick_top(line1_candidates, "score", topn=5)
-    line2_top = _pick_top(line2_candidates, "score", topn=5)
+        if not line1_candidates or not line2_candidates:
+            continue
 
-    best_pair = None
-    pair_count = 0
+        line1_top = _pick_top(line1_candidates, "score", topn=5)
+        line2_top = _pick_top(line2_candidates, "score", topn=5)
 
-    for c1 in line1_top:
-        for c2 in line2_top:
-            pair_count += 1
-            checks = c2.get("checks") or validate_td3_checks(c2["text"])
-            pair_score = c1["score"] + c2["score"] + (checks["passed_count"] * 4.0)
+        best_pair = None
+        pair_count = 0
 
-            candidate_pair = {
-                "line1": c1,
-                "line2": c2,
-                "pair_score": pair_score,
-                "checks": checks,
-                "repairs_applied": list(c1.get("repairs", [])),
-            }
+        for c1 in line1_top:
+            for c2 in line2_top:
+                pair_count += 1
+                checks = c2.get("checks") or validate_td3_checks(c2["text"])
+                pair_score = c1["score"] + c2["score"] + (checks["passed_count"] * 4.0)
 
-            if best_pair is None or candidate_pair["pair_score"] > best_pair["pair_score"]:
-                best_pair = candidate_pair
+                candidate_pair = {
+                    "line1": c1,
+                    "line2": c2,
+                    "pair_score": pair_score,
+                    "checks": checks,
+                    "repairs_applied": list(c1.get("repairs", [])),
+                }
+
+                if best_pair is None or candidate_pair["pair_score"] > best_pair["pair_score"]:
+                    best_pair = candidate_pair
+
+        if best_pair is None:
+            continue
+
+        split_score = score_split_quality(
+            split_info,
+            best_pair["checks"],
+            best_pair["line2"]["score"],
+        )
+
+        bundle = {
+            "split_info": split_info,
+            "split_score": split_score,
+            "best_pair": best_pair,
+            "line1_top": line1_top,
+            "line2_top": line2_top,
+            "pair_count": pair_count,
+            "line1_img": line1_img,
+            "line2_img": line2_img,
+        }
+
+        if best_split_bundle is None or bundle["split_score"] > best_split_bundle["split_score"]:
+            best_split_bundle = bundle
+
+    if best_split_bundle is None:
+        raise RuntimeError("No valid split candidates produced OCR results")
+
+    best_pair = best_split_bundle["best_pair"]
+    line1_top = best_split_bundle["line1_top"]
+    line2_top = best_split_bundle["line2_top"]
+    pair_count = best_split_bundle["pair_count"]
 
     best_line1 = best_pair["line1"]["text"]
     best_line2 = best_pair["line2"]["text"]
     checks = best_pair["checks"]
 
+    save(best_split_bundle["line1_img"], "mrz_line1.png")
+    save(best_split_bundle["line2_img"], "mrz_line2.png")
     save(best_pair["line1"]["image"], "best_variant_line1.png")
     save(best_pair["line2"]["image"], "best_variant_line2.png")
 
     parsed = parse_mrz_fields(best_line1, best_line2)
 
     ocr_meta = {
-        "split": split_meta,
+        "split": {
+            **split_meta,
+            "selected_label": best_split_bundle["split_info"]["label"],
+            "selected_split_y": best_split_bundle["split_info"]["split_y"],
+            "selected_top_ratio": round(best_split_bundle["split_info"]["top_ratio"], 3),
+            "selected_bottom_ratio": round(best_split_bundle["split_info"]["bottom_ratio"], 3),
+            "selected_split_score": round(best_split_bundle["split_score"], 2),
+        },
         "candidate_stats": {
             "line1_candidates": len(line1_candidates),
             "line2_candidates": len(line2_candidates),
