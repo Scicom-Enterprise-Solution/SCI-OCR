@@ -40,13 +40,14 @@ Template:
 ## Run
 
 ```bash
-python run_pipeline.py <path-to-passport.pdf>
+python run_pipeline.py <path-to-passport.pdf-or-image>
 ```
 
-Example:
+Examples:
 
 ```bash
-python run_pipeline.py samples/passport.pdf
+python run_pipeline.py samples/sss.png
+python run_pipeline.py samples/101359705.pdf
 ```
 
 ## Tests
@@ -57,9 +58,25 @@ Run unit tests:
 python -m unittest -q
 ```
 
+## Reference Samples
+
+The `samples/` directory is tracked in git and contains the sample PDFs, PNGs, and MRZ reference data used for regression checks.
+
+- `samples/mrz_reference_samples.json` - corrected MRZ reference data keyed by legacy numeric `sample_id`
+- `samples/mrz_reference_samples_by_filename.json` - the same reference data keyed by filename (for example `sss.png`)
+
 ## Output
 
-Pipeline artifacts are written to `output/` (for example: `aligned_passport.png`, `mrz_region.png`, `mrz_detected.png`, `mrz_clean.png`).
+Pipeline artifacts are written to `output/<sample-name>/`.
+
+Typical files include:
+
+- `aligned_passport.png`
+- `mrz_region.png`
+- `mrz_detected.png`
+- `mrz_clean.png`
+- `<sample-name>_report.json`
+- `report.json`
 
 ## Main Files
 
@@ -71,5 +88,5 @@ Pipeline artifacts are written to `output/` (for example: `aligned_passport.png`
 
 ## Notes
 
-- `samples/` and `output/` are ignored by Git in `.gitignore`.
+- `samples/` is tracked in git. `output/` remains git-ignored.
 - If MRZ is not detected, check the debug images in `output/`.
