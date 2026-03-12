@@ -113,14 +113,22 @@ def parse_mrz_td3(line1: str, line2: str) -> dict:
 
 def write_pipeline_report(output_dir: str, report_data: dict, filename: str = "report.json") -> str:
     os.makedirs(output_dir, exist_ok=True)
-    out_path = os.path.join(output_dir, filename)
+    sample_name = os.path.basename(os.path.normpath(output_dir)) or "report"
+    prefixed_filename = f"{sample_name}_{filename}" if not filename.startswith(f"{sample_name}_") else filename
+    out_path = os.path.join(output_dir, prefixed_filename)
+    legacy_path = os.path.join(output_dir, filename)
 
     payload = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "report_file": os.path.basename(out_path),
         **report_data,
     }
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+
+    if legacy_path != out_path:
+        with open(legacy_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
 
     return out_path

@@ -167,6 +167,8 @@ COMMON_COUNTRIES = {
     "SGP", "QAT", "KWT", "OMN", "DEU", "FRA", "ITA", "ESP", "NLD"
 }
 
+PAIR_COUNTRY_MATCH_BONUS = 10.0
+
 
 # -------------------------------------------------------
 # BASIC IO
@@ -299,24 +301,20 @@ def validate_td3_checks(line2: str) -> dict:
 
     doc_number = line2[0:9]
     doc_check = line2[9]
-    nationality = line2[10:13]
     dob = line2[13:19]
     dob_check = line2[19]
-    sex = line2[20]
     expiry = line2[21:27]
     expiry_check = line2[27]
     personal = line2[28:42]
     personal_check = line2[42]
     final_check = line2[43]
 
-    composite_data = (
-        doc_number + doc_check +
-        nationality +
-        dob + dob_check +
-        sex +
-        expiry + expiry_check +
-        personal + personal_check
-    )
+    personal_expected = checksum(personal)
+    personal_valid = personal_check == "<" and personal == "<" * 14
+    if not personal_valid:
+        personal_valid = personal_expected == personal_check
+
+    composite_data = line2[0:10] + line2[13:20] + line2[21:43]
 
     result = {
         "document": {
@@ -336,8 +334,8 @@ def validate_td3_checks(line2: str) -> dict:
         },
         "personal_number": {
             "actual": personal_check,
-            "expected": checksum(personal),
-            "valid": checksum(personal) == personal_check,
+            "expected": personal_expected,
+            "valid": personal_valid,
         },
         "composite": {
             "actual": final_check,
@@ -809,6 +807,22 @@ def score_split_quality(split_info, best_line2_checks, best_line2_score):
     return score
 
 
+def pair_consistency_bonus(line1: str, line2: str) -> float:
+    line1 = normalize_td3_line1(line1)
+    line2 = normalize_td3_line2(line2)
+
+    issuing_country = line1[2:5]
+    nationality = line2[10:13]
+
+    if (
+        re.fullmatch(r"[A-Z]{3}", issuing_country)
+        and issuing_country == nationality
+    ):
+        return PAIR_COUNTRY_MATCH_BONUS
+
+    return 0.0
+
+
 # -------------------------------------------------------
 # LINE-1 REPAIR
 # -------------------------------------------------------
@@ -1057,21 +1071,47 @@ def run_ocr(mrz_img):
         best_pair = None
         pair_count = 0
 
-        for c1 in line1_top:
-            for c2 in line2_top:
+        for c1 in line1_candidates:
+            for c2 in line2_candidates:
                 pair_count += 1
                 checks = c2.get("checks") or validate_td3_checks(c2["text"])
-                pair_score = c1["score"] + c2["score"] + (checks["passed_count"] * 4.0)
+                pair_bonus = pair_consistency_bonus(c1["text"], c2["text"])
+                pair_score = (
+                    c1["score"]
+                    + c2["score"]
+                    + (checks["passed_count"] * 4.0)
+                    + pair_bonus
+                )
 
                 candidate_pair = {
                     "line1": c1,
                     "line2": c2,
                     "pair_score": pair_score,
+                    "pair_bonus": pair_bonus,
                     "checks": checks,
                     "repairs_applied": list(c1.get("repairs", [])),
                 }
 
-                if best_pair is None or candidate_pair["pair_score"] > best_pair["pair_score"]:
+                candidate_key = (
+                    candidate_pair["pair_score"],
+                    candidate_pair["pair_bonus"],
+                    candidate_pair["line1"]["score"],
+                    candidate_pair["line2"]["score"],
+                    candidate_pair["line1"]["text"],
+                    candidate_pair["line2"]["text"],
+                )
+                best_key = None
+                if best_pair is not None:
+                    best_key = (
+                        best_pair["pair_score"],
+                        best_pair.get("pair_bonus", 0.0),
+                        best_pair["line1"]["score"],
+                        best_pair["line2"]["score"],
+                        best_pair["line1"]["text"],
+                        best_pair["line2"]["text"],
+                    )
+
+                if best_pair is None or candidate_key > best_key:
                     best_pair = candidate_pair
 
         if best_pair is None:
@@ -1166,6 +1206,7 @@ def run_ocr(mrz_img):
                 "variant_meta": best_pair["line2"]["variant_meta"],
             },
             "pair_score": round(best_pair["pair_score"], 2),
+            "pair_bonus": round(best_pair.get("pair_bonus", 0.0), 2),
         },
         "checksum_summary": checks,
         "repairs_applied": best_pair["repairs_applied"],
