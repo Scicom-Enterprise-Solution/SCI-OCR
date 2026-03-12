@@ -1,6 +1,8 @@
 import unittest
 
 from ocr_mrz import (
+    _apply_candidate_support_bonus,
+    _pair_selection_key,
     is_valid_mrz_country_code,
     normalize_td3_line1,
     pair_consistency_bonus,
@@ -8,6 +10,8 @@ from ocr_mrz import (
     repair_issuing_country_code,
     repair_td3_line1,
     score_td3_line1,
+    score_td3_line2,
+    validate_and_correct_mrz,
     validate_td3_checks,
 )
 
@@ -58,6 +62,24 @@ class TestLine1Repair(unittest.TestCase):
     def test_accepts_uto_mrz_country_code(self) -> None:
         self.assertTrue(is_valid_mrz_country_code("UTO"))
 
+    def test_support_bonus_prefers_consensus_line1_candidate(self) -> None:
+        expected = "P<JORALMOUSA<<AWS<WAJDI<FAROUQ<<<<<<<<<<<<<<"
+        wrong = "P<JORALMOUSA<<AUS<WAJDI<FAROUR<<<<<<<<<<<<<<"
+        candidates = [
+            {"text": expected, "score": 82.5}
+            for _ in range(18)
+        ] + [
+            {"text": wrong, "score": 86.5}
+            for _ in range(5)
+        ]
+
+        _apply_candidate_support_bonus(candidates)
+
+        best = max(candidates, key=lambda cand: cand["score"])
+
+        self.assertEqual(best["text"], expected)
+        self.assertGreater(best["score"], max(c["score"] for c in candidates if c["text"] == wrong))
+
 
 class TestLine2Checks(unittest.TestCase):
     def test_valid_td3_line2_reports_composite_check(self) -> None:
@@ -82,6 +104,68 @@ class TestLine2Checks(unittest.TestCase):
         )
 
         self.assertEqual(bonus, 0.0)
+
+    def test_validate_and_correct_mrz_normalizes_numeric_date_fields(self) -> None:
+        _, repaired, checks = validate_and_correct_mrz(
+            "",
+            "0Q07341557GIN00L2083F27051142001208017021578",
+        )
+
+        self.assertEqual(repaired[13:19], "001208")
+        self.assertEqual(checks["passed_count"], 5)
+
+    def test_validate_and_correct_mrz_repairs_document_number_q_to_o_when_checksum_matches(self) -> None:
+        _, repaired, checks = validate_and_correct_mrz(
+            "",
+            "Q0Q7341557GIN0012083F27051142001208017021578",
+        )
+
+        self.assertEqual(repaired[:10], "O007341557")
+        self.assertEqual(checks["passed_count"], 5)
+
+    def test_score_td3_line2_prefers_fewer_ambiguous_doc_chars(self) -> None:
+        cleaner_score, _ = score_td3_line2(
+            "0Q07341557GIN0012083F27051142001208017021578"
+        )
+        noisier_score, _ = score_td3_line2(
+            "O00734L557GIN0012083F27051142001208017021578"
+        )
+
+        self.assertGreater(cleaner_score, noisier_score)
+
+
+class TestPairSelection(unittest.TestCase):
+    def test_pair_selection_prefers_lower_candidate_rank_over_lexicographic_text(self) -> None:
+        better_pair = {
+            "pair_score": 294.0,
+            "pair_bonus": 10.0,
+            "line1": {
+                "score": 114.0,
+                "candidate_rank": 0,
+                "text": "P<BGDALAM<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<",
+            },
+            "line2": {
+                "score": 150.0,
+                "candidate_rank": 0,
+                "text": "A098919372BGD0601038M36020815119012168<<<<26",
+            },
+        }
+        worse_pair = {
+            "pair_score": 294.0,
+            "pair_bonus": 10.0,
+            "line1": {
+                "score": 114.0,
+                "candidate_rank": 5,
+                "text": "P<BGDALAN<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<",
+            },
+            "line2": {
+                "score": 150.0,
+                "candidate_rank": 0,
+                "text": "A098919372BGD0601038M36020815119012168<<<<26",
+            },
+        }
+
+        self.assertGreater(_pair_selection_key(better_pair), _pair_selection_key(worse_pair))
 
 
 
