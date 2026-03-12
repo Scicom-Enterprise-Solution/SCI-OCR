@@ -170,6 +170,19 @@ COUNTRY_CODE_AMBIGUOUS_SUBS = {
     "8": ("B",),
 }
 
+NUMERIC_FIELD_SUBS = {
+    "O": "0",
+    "Q": "0",
+    "I": "1",
+    "L": "1",
+    "Z": "2",
+    "S": "5",
+    "B": "8",
+    "G": "6",
+}
+
+AMBIGUOUS_DOC_CHARS = set(NUMERIC_FIELD_SUBS)
+
 MIN_TOKEN_REPAIR_SCORE_GAIN = 6.0
 
 PAIR_COUNTRY_MATCH_BONUS = 10.0
@@ -244,6 +257,15 @@ def _generate_country_code_variants(code: str) -> set[str]:
                 variants.add(candidate)
 
     return variants
+
+
+def _normalize_numeric_field(data: str) -> str:
+    data = normalize_mrz(data)
+    return "".join(NUMERIC_FIELD_SUBS.get(ch, ch) for ch in data)
+
+
+def _ambiguous_doc_char_count(data: str) -> int:
+    return sum(1 for ch in normalize_mrz(data) if ch in AMBIGUOUS_DOC_CHARS)
 
 
 # -------------------------------------------------------
@@ -381,8 +403,8 @@ def validate_and_correct_mrz(line1: str, line2: str) -> tuple[str, str, dict]:
         return line1, line2, validate_td3_checks(line2)
 
     doc_number = correct_field(line2[0:9], line2[9])
-    dob = correct_field(line2[13:19], line2[19])
-    expiry = correct_field(line2[21:27], line2[27])
+    dob = correct_field(_normalize_numeric_field(line2[13:19]), line2[19])
+    expiry = correct_field(_normalize_numeric_field(line2[21:27]), line2[27])
     personal = correct_field(line2[28:42], line2[42])
 
     repaired_line2 = (
@@ -777,6 +799,9 @@ def score_td3_line1(text: str) -> float:
 def score_td3_line2(text: str) -> tuple[float, dict]:
     text = normalize_td3_line2(text)
     score = 0.0
+    doc_number = text[0:9]
+    dob = text[13:19]
+    expiry = text[21:27]
 
     if len(text) == MRZ_LINE_LEN:
         score += 20
@@ -787,6 +812,12 @@ def score_td3_line2(text: str) -> tuple[float, dict]:
         score += 10
     else:
         score -= 15
+
+    score -= _ambiguous_doc_char_count(doc_number) * 3.0
+
+    dob_non_digits = sum(1 for ch in dob if not ch.isdigit())
+    expiry_non_digits = sum(1 for ch in expiry if not ch.isdigit())
+    score -= (dob_non_digits + expiry_non_digits) * 10.0
 
     nationality = text[10:13]
     if re.fullmatch(r"[A-Z<]{3}", nationality):

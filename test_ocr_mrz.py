@@ -8,6 +8,8 @@ from ocr_mrz import (
     repair_issuing_country_code,
     repair_td3_line1,
     score_td3_line1,
+    score_td3_line2,
+    validate_and_correct_mrz,
     validate_td3_checks,
 )
 
@@ -82,6 +84,25 @@ class TestLine2Checks(unittest.TestCase):
         )
 
         self.assertEqual(bonus, 0.0)
+
+    def test_validate_and_correct_mrz_normalizes_numeric_date_fields(self) -> None:
+        _, repaired, checks = validate_and_correct_mrz(
+            "",
+            "0Q07341557GIN00L2083F27051142001208017021578",
+        )
+
+        self.assertEqual(repaired[13:19], "001208")
+        self.assertEqual(checks["passed_count"], 5)
+
+    def test_score_td3_line2_prefers_fewer_ambiguous_doc_chars(self) -> None:
+        cleaner_score, _ = score_td3_line2(
+            "0Q07341557GIN0012083F27051142001208017021578"
+        )
+        noisier_score, _ = score_td3_line2(
+            "O00734L557GIN0012083F27051142001208017021578"
+        )
+
+        self.assertGreater(cleaner_score, noisier_score)
 
 
 
