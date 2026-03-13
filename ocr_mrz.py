@@ -1,9 +1,13 @@
 import os
 import re
 import math
+import sys
 import shutil
 import itertools
 import inspect
+import io
+import contextlib
+import warnings
 import cv2
 import pytesseract
 import numpy as np
@@ -13,6 +17,18 @@ from mrz_country_codes import is_valid_mrz_country_code
 
 
 load_env_file()
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*RequestsDependencyWarning: urllib3.*|urllib3 .* doesn't match a supported version.*",
+    module=r"requests(\..*)?",
+)
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*No ccache found.*",
+    category=UserWarning,
+)
 
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output")
 
@@ -78,6 +94,25 @@ def _resolve_paddle_cache_home() -> str:
         return env_cache
 
     return os.path.abspath(os.path.join(os.getcwd(), ".paddlex"))
+
+
+def _ensure_stub_ccache_on_path() -> None:
+    paths = os.environ.get("PATH", "").split(os.pathsep)
+    for path in paths:
+        if path and os.path.exists(os.path.join(path, "ccache")):
+            return
+
+    stub_dir = os.path.join(_resolve_paddle_cache_home(), "bin")
+    os.makedirs(stub_dir, exist_ok=True)
+    stub_path = os.path.join(stub_dir, "ccache")
+
+    if not os.path.exists(stub_path):
+        with open(stub_path, "w", encoding="ascii") as f:
+            f.write("#!/bin/sh\n")
+            f.write('exec "$@"\n')
+        os.chmod(stub_path, 0o755)
+
+    os.environ["PATH"] = stub_dir + os.pathsep + os.environ.get("PATH", "")
 
 
 def _should_disable_paddle_model_source_check(paddle_cache_home: str) -> bool:
@@ -506,6 +541,21 @@ def validate_and_correct_mrz(line1: str, line2: str) -> tuple[str, str, dict]:
         substitutions=DOC_NUMBER_AMBIGUOUS_SUBS,
         field_kind="document_number",
     )
+    nationality = line2[10:13]
+    valid_nationality_variants = [
+        candidate
+        for candidate in _generate_country_code_variants(nationality)
+        if is_valid_mrz_country_code(candidate)
+    ]
+    if valid_nationality_variants:
+        nationality = max(
+            valid_nationality_variants,
+            key=lambda candidate: (
+                int(candidate == nationality),
+                -sum(1 for src, dst in zip(nationality, candidate) if src != dst),
+                candidate,
+            ),
+        )
     dob = correct_field(_normalize_numeric_field(line2[13:19]), line2[19])
     expiry = correct_field(_normalize_numeric_field(line2[21:27]), line2[27])
     personal = correct_field(line2[28:42], line2[42])
@@ -513,7 +563,7 @@ def validate_and_correct_mrz(line1: str, line2: str) -> tuple[str, str, dict]:
     repaired_line2 = (
         doc_number
         + line2[9]
-        + line2[10:13]
+        + nationality
         + dob
         + line2[19]
         + line2[20]
@@ -818,6 +868,36 @@ def _resolve_ocr_backends() -> list[str]:
     return ["tesseract"]
 
 
+def _resolve_paddle_use_gpu() -> bool:
+    if not PADDLEOCR_USE_GPU:
+        return False
+
+    _ensure_stub_ccache_on_path()
+
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        try:
+            import paddle
+        except ImportError:
+            print("[WARN] Paddle GPU requested but 'paddle' is not installed")
+            return False
+
+    if not paddle.device.is_compiled_with_cuda():
+        print("[WARN] Paddle GPU requested but the installed Paddle build has no CUDA support")
+        return False
+
+    try:
+        device_count = paddle.device.cuda.device_count()
+    except Exception as exc:
+        print(f"[WARN] Paddle GPU requested but CUDA device detection failed: {exc}")
+        return False
+
+    if device_count < 1:
+        print("[WARN] Paddle GPU requested but no CUDA devices are visible; falling back to CPU")
+        return False
+
+    return True
+
+
 def _get_paddle_ocr():
     global _PADDLE_OCR_INSTANCE
 
@@ -827,21 +907,24 @@ def _get_paddle_ocr():
     paddle_cache_home = _resolve_paddle_cache_home()
     os.environ["PADDLE_PDX_CACHE_HOME"] = paddle_cache_home
     os.makedirs(paddle_cache_home, exist_ok=True)
+    _ensure_stub_ccache_on_path()
     if _should_disable_paddle_model_source_check(paddle_cache_home):
         os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
-    try:
-        from paddleocr import PaddleOCR
-    except ImportError as exc:
-        raise RuntimeError(
-            "PaddleOCR backend requested but 'paddleocr' is not installed in the active environment"
-        ) from exc
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        try:
+            from paddleocr import PaddleOCR
+        except ImportError as exc:
+            raise RuntimeError(
+                "PaddleOCR backend requested but 'paddleocr' is not installed in the active environment"
+            ) from exc
 
+    use_gpu = _resolve_paddle_use_gpu()
     kwargs = {"lang": PADDLEOCR_LANG}
     signature = inspect.signature(PaddleOCR.__init__)
 
     if "use_gpu" in signature.parameters:
-        kwargs["use_gpu"] = PADDLEOCR_USE_GPU
+        kwargs["use_gpu"] = use_gpu
     if "show_log" in signature.parameters:
         kwargs["show_log"] = False
     if "use_doc_orientation_classify" in signature.parameters:
@@ -853,7 +936,8 @@ def _get_paddle_ocr():
     if "ocr_version" in signature.parameters:
         kwargs["ocr_version"] = "PP-OCRv5"
 
-    _PADDLE_OCR_INSTANCE = PaddleOCR(**kwargs)
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        _PADDLE_OCR_INSTANCE = PaddleOCR(**kwargs)
     return _PADDLE_OCR_INSTANCE
 
 
@@ -1640,6 +1724,57 @@ def repair_td3_line1(line1: str) -> tuple[str, list[dict]]:
     return line, repairs
 
 
+def _repair_paddle_line1_candidate(line1: str) -> tuple[str, dict | None]:
+    line = _trim_line1_spill(line1)
+
+    if not line.startswith("P<"):
+        return line, None
+
+    name_zone = line[5:]
+    if "<<" not in name_zone:
+        return line, None
+
+    issuing_country = line[2:5]
+    surname_raw, given_raw = name_zone.split("<<", 1)
+    surname = _sanitize_name_token(surname_raw)
+
+    if not surname:
+        return line, None
+
+    baseline_score = score_td3_line1(line)
+    given_token, given_tail = _split_given_name_zone(given_raw)
+    ranked = []
+    surname_variants = {surname}
+    for i, ch in enumerate(surname):
+        if ch == "N":
+            surname_variants.add(surname[:i] + "M" + surname[i + 1:])
+        elif ch == "M":
+            surname_variants.add(surname[:i] + "N" + surname[i + 1:])
+
+    for variant in surname_variants:
+        rebuilt = _build_td3_line1(issuing_country, variant, given_token, given_tail)
+        ranked.append((
+            score_td3_line1(rebuilt),
+            variant.count("M") - surname.count("M"),
+            surname.count("N") - variant.count("N"),
+            variant,
+            rebuilt,
+        ))
+
+    best_score, _, _, best_surname, best_line = max(ranked)
+    if best_surname == surname or best_score < baseline_score:
+        return line, None
+
+    return best_line, {
+        "field": "line1",
+        "position": "surname",
+        "from": surname,
+        "to": best_surname,
+        "reason": "paddle_surname_ambiguity_repair",
+        "score_gain": round(best_score - baseline_score, 2),
+    }
+
+
 # -------------------------------------------------------
 # PARSING
 # -------------------------------------------------------
@@ -1759,6 +1894,11 @@ def run_ocr(mrz_img):
         for cand in line1_candidates:
             text = _trim_line1_spill(cand["text"])
             repaired, repairs = repair_td3_line1(text)
+            if cand.get("backend") == "paddle":
+                paddle_repaired, paddle_meta = _repair_paddle_line1_candidate(repaired)
+                if paddle_meta is not None:
+                    repaired = paddle_repaired
+                    repairs = repairs + [paddle_meta]
             cand["text"] = _trim_line1_spill(repaired)
             cand["repairs"] = repairs
             cand["score"] = score_td3_line1(cand["text"])

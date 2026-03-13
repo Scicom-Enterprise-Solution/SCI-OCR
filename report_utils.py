@@ -116,7 +116,6 @@ def write_pipeline_report(output_dir: str, report_data: dict, filename: str = "r
     sample_name = os.path.basename(os.path.normpath(output_dir)) or "report"
     prefixed_filename = f"{sample_name}_{filename}" if not filename.startswith(f"{sample_name}_") else filename
     out_path = os.path.join(output_dir, prefixed_filename)
-    legacy_path = os.path.join(output_dir, filename)
 
     payload = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -126,9 +125,5 @@ def write_pipeline_report(output_dir: str, report_data: dict, filename: str = "r
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
-
-    if legacy_path != out_path:
-        with open(legacy_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
 
     return out_path

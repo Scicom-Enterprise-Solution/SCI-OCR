@@ -26,6 +26,7 @@ Output (all saved to output/):
 
 import os
 import sys
+import json
 import cv2
 
 from env_utils import load_env_file
@@ -55,6 +56,74 @@ from report_utils import write_pipeline_report, parse_mrz_td3
 
 
 SUPPORTED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+
+
+def build_reference_comparison(input_path: str, line1: str, line2: str) -> dict:
+    reference_path = os.path.join(
+        os.path.dirname(__file__),
+        "samples",
+        "mrz_reference_samples_by_filename.json",
+    )
+    filename = os.path.basename(input_path)
+
+    comparison = {
+        "reference_available": False,
+        "reference_file": os.path.abspath(reference_path),
+        "filename": filename,
+    }
+
+    if not os.path.isfile(reference_path):
+        return comparison
+
+    try:
+        with open(reference_path, "r", encoding="utf-8") as f:
+            refs = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        comparison["reference_error"] = "reference_file_unreadable"
+        return comparison
+
+    expected = refs.get(filename)
+    if not isinstance(expected, dict):
+        return comparison
+
+    expected_line1 = expected.get("line1", "")
+    expected_line2 = expected.get("line2", "")
+    line1_match = line1 == expected_line1
+    line2_match = line2 == expected_line2
+
+    comparison.update({
+        "reference_available": True,
+        "line1_match": line1_match,
+        "line2_match": line2_match,
+        "exact_match": line1_match and line2_match,
+        "expected": {
+            "line1": expected_line1,
+            "line2": expected_line2,
+        },
+    })
+    return comparison
+
+
+def print_reference_comparison(comparison: dict) -> None:
+    if not comparison.get("reference_available"):
+        print("[Reference] No reference entry for this sample.")
+        return
+
+    line1_match = comparison.get("line1_match", False)
+    line2_match = comparison.get("line2_match", False)
+    exact_match = comparison.get("exact_match", False)
+
+    print(
+        "[Reference] "
+        f"{'PASS' if exact_match else 'FAIL'} "
+        f"(line1={'PASS' if line1_match else 'FAIL'}, "
+        f"line2={'PASS' if line2_match else 'FAIL'})"
+    )
+
+    if not line1_match:
+        print(f"[Reference] Expected line1: {comparison['expected']['line1']}")
+    if not line2_match:
+        print(f"[Reference] Expected line2: {comparison['expected']['line2']}")
 
 
 def load_stage1_input(input_path: str):
@@ -318,10 +387,12 @@ def main() -> None:
     report["mrz"]["text"]["line2"] = line2
     report["mrz"]["parsed"] = ocr_meta.get("parsed_fields") or parse_mrz_td3(line1, line2)
     report["mrz"]["ocr"] = ocr_meta
+    report["reference_comparison"] = build_reference_comparison(input_path, line1, line2)
     report["status"] = "success"
 
     report_path = write_pipeline_report(output_dir, report)
     print(f"[Report] {report_path}")
+    print_reference_comparison(report["reference_comparison"])
 
     print("\n[Stage 3] Final MRZ:")
     print("-" * 60)
@@ -352,6 +423,8 @@ def main() -> None:
         print(line2)
     else:
         print("(no text)")
+    print()
+    print_reference_comparison(report["reference_comparison"])
 
 
 if __name__ == "__main__":

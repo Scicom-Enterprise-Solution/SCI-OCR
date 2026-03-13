@@ -1,5 +1,6 @@
 import importlib
 import os
+import sys
 import unittest
 import numpy as np
 from unittest import mock
@@ -10,7 +11,9 @@ from ocr_mrz import (
     _paddle_ocr_image,
     _pair_selection_key,
     _prepare_variants,
+    _repair_paddle_line1_candidate,
     _resolve_ocr_backends,
+    _resolve_paddle_use_gpu,
     _trim_line1_spill,
     build_split_candidates,
     estimate_ocr_search_space,
@@ -185,6 +188,14 @@ class TestLine2Checks(unittest.TestCase):
         self.assertEqual(repaired[:10], "O007341557")
         self.assertEqual(checks["passed_count"], 5)
 
+    def test_validate_and_correct_mrz_repairs_nationality_zero_to_letter_o(self) -> None:
+        _, repaired, _ = validate_and_correct_mrz(
+            "",
+            "T1493973<9J0R0706265M31030839000186766<<<<56",
+        )
+
+        self.assertEqual(repaired[10:13], "JOR")
+
     def test_score_td3_line2_prefers_fewer_ambiguous_doc_chars(self) -> None:
         cleaner_score, _ = score_td3_line2(
             "0Q07341557GIN0012083F27051142001208017021578"
@@ -301,6 +312,15 @@ class TestOcrBackendSelection(unittest.TestCase):
 
 
 class TestPaddleOcrAdapter(unittest.TestCase):
+    def test_resolve_paddle_use_gpu_returns_true_when_cuda_device_is_visible(self) -> None:
+        fake_paddle = mock.Mock()
+        fake_paddle.device.is_compiled_with_cuda.return_value = True
+        fake_paddle.device.cuda.device_count.return_value = 1
+
+        with mock.patch("ocr_mrz.PADDLEOCR_USE_GPU", True):
+            with mock.patch.dict(sys.modules, {"paddle": fake_paddle}):
+                self.assertTrue(_resolve_paddle_use_gpu())
+
     def test_paddle_ocr_image_converts_grayscale_to_bgr(self) -> None:
         seen = {}
 
@@ -337,6 +357,17 @@ class TestPaddleOcrAdapter(unittest.TestCase):
             best,
             "P<BGDAHMAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<",
         )
+
+    def test_paddle_specific_line1_repair_prefers_ahmad_over_ahnad(self) -> None:
+        repaired, meta = _repair_paddle_line1_candidate(
+            "P<BGDAHNAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<"
+        )
+
+        self.assertEqual(
+            repaired,
+            "P<BGDAHMAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<",
+        )
+        self.assertIsNotNone(meta)
 
 
 
