@@ -73,7 +73,7 @@ if resolved_tesseract_cmd:
 MRZ_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
 MRZ_LINE_LEN = 44
 TESSERACT_LANG = os.getenv("TESSERACT_LANG", "eng").strip() or "eng"
-OCR_BACKEND = os.getenv("OCR_BACKEND", "tesseract").strip().lower() or "tesseract"
+OCR_BACKEND = os.getenv("OCR_BACKEND", "paddle").strip().lower() or "paddle"
 PADDLEOCR_LANG = os.getenv("PADDLEOCR_LANG", "en").strip() or "en"
 
 
@@ -864,8 +864,8 @@ def _resolve_ocr_backends() -> list[str]:
         return [backend]
     if backend in {"auto", "hybrid", "both"}:
         return ["tesseract", "paddle"]
-    print(f"[WARN] Unknown OCR_BACKEND='{backend}', falling back to tesseract")
-    return ["tesseract"]
+    print(f"[WARN] Unknown OCR_BACKEND='{backend}', falling back to paddle")
+    return ["paddle"]
 
 
 def _resolve_paddle_use_gpu() -> bool:

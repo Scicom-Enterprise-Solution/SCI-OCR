@@ -10,7 +10,7 @@ This project extracts Machine Readable Zone (MRZ) text from a passport PDF in 3 
 
 - Python 3.10+
 - Tesseract OCR installed and available on `PATH`
-- Oracle Linux 9 example: `sudo dnf install -y tesseract tesseract-langpack-eng`
+- Linux example: `sudo dnf install -y tesseract tesseract-langpack-eng`
 - Note: Oracle Linux's packaged `eng` data is LSTM-only here, so legacy OEM modes `0` and `2` are not available unless you install a legacy-capable traineddata file manually.
 - Optional MRZ improvement: install `ocrb.traineddata` and set `TESSERACT_LANG=eng+ocrb` or `ocrb`
 
@@ -57,25 +57,26 @@ python run_pipeline.py samples/sss.png
 python run_pipeline.py samples/101359705.pdf
 FAST_OCR=true python run_pipeline.py samples/xcxc.png
 FAST_OCR=false python run_pipeline.py samples/xcxc.png
-OCR_BACKEND=paddle python run_pipeline.py samples/sadia.png
+python run_pipeline.py samples/sadia.png
 OCR_BACKEND=auto python run_pipeline.py samples/sadia.png
 ```
 
 Use `FAST_OCR=true` only for quick smoke tests. For production MRZ extraction, keep the exhaustive profile enabled.
 
-## Optional PaddleOCR Backend
+## PaddleOCR Backend
 
-The project can now run Stage 3 with PaddleOCR in addition to Tesseract.
+The project can run Stage 3 with PaddleOCR in addition to Tesseract. `OCR_BACKEND=paddle` is the current default.
 
-Install Paddle packages into the project venv:
+### Linux GPU install
+
+Use this when the machine has an NVIDIA GPU available to Linux and Paddle can see a CUDA device.
 
 ```bash
-.venv/bin/python -m pip uninstall -y paddlepaddle
-.venv/bin/python -m pip install paddlepaddle-gpu==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
-.venv/bin/python -m pip install -r requirements-paddle.txt
+.venv/bin/python -m pip uninstall -y paddlepaddle paddlepaddle-gpu
+.venv/bin/python -m pip install -r requirements-paddle-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
 ```
 
-Verify that the installed Paddle build can see the WSL GPU:
+Verify that the installed Paddle build can see the Linux GPU:
 
 ```bash
 .venv/bin/python - <<'PY'
@@ -88,18 +89,42 @@ PY
 
 Expected result: CUDA support is `True` and the device count is at least `1`.
 
+Then use:
+
+```bash
+export OCR_BACKEND=paddle
+export PADDLEOCR_USE_GPU=True
+```
+
+### Linux CPU install
+
+Use this on Linux systems without a GPU, or when you explicitly want PaddleOCR on CPU.
+
+```bash
+.venv/bin/python -m pip uninstall -y paddlepaddle paddlepaddle-gpu
+.venv/bin/python -m pip install -r requirements-paddle-cpu.txt
+```
+
+Then use:
+
+```bash
+export OCR_BACKEND=paddle
+export PADDLEOCR_USE_GPU=False
+```
+
 Then run with one of:
 
 ```bash
-OCR_BACKEND=paddle .venv/bin/python run_pipeline.py samples/sadia.png
+.venv/bin/python run_pipeline.py samples/sadia.png
 OCR_BACKEND=auto .venv/bin/python run_pipeline.py samples/sadia.png
+OCR_BACKEND=tesseract .venv/bin/python run_pipeline.py samples/sadia.png
 ```
 
 Recommended:
 
-- `OCR_BACKEND=tesseract` for the current stable baseline
-- `OCR_BACKEND=paddle` to benchmark PaddleOCR only
-- `OCR_BACKEND=auto` to combine PaddleOCR and Tesseract candidates
+- `OCR_BACKEND=paddle` as the current default and fastest production path on Linux when Paddle is configured correctly
+- `OCR_BACKEND=auto` to combine PaddleOCR and Tesseract candidates when you want a hybrid check
+- `OCR_BACKEND=tesseract` for baseline or fallback comparisons
 
 ## Tests
 
@@ -127,7 +152,16 @@ Typical files include:
 - `mrz_detected.png`
 - `mrz_clean.png`
 - `<sample-name>_report.json`
-- `report.json`
+
+## Backend Regression Scripts
+
+Run the full referenced sample set with a specific OCR backend:
+
+```bash
+python scripts/check_reference_set_paddle.py
+python scripts/check_reference_set_auto.py
+python scripts/check_reference_set_tesseract.py
+```
 
 ## Main Files
 

@@ -1,2 +1,4 @@
+# Backward-compatible alias for the current recommended Linux GPU setup.
+# For CPU-only installs, use requirements-paddle-cpu.txt instead.
 paddlepaddle-gpu==3.2.0
 paddleocr

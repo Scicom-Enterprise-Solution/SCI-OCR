@@ -1,0 +1,2 @@
+paddlepaddle-gpu==3.2.0
+paddleocr
