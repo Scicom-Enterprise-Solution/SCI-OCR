@@ -6,6 +6,7 @@ from ocr_mrz import (
     is_valid_mrz_country_code,
     normalize_td3_line1,
     pair_consistency_bonus,
+    repair_given_name_zone,
     repair_given_name_token,
     repair_issuing_country_code,
     repair_td3_line1,
@@ -43,6 +44,29 @@ class TestLine1Repair(unittest.TestCase):
 
         self.assertEqual(repaired, "SHAHADAT")
         self.assertFalse(meta["changed"])
+
+    def test_repair_given_name_zone_trims_ocr_noise_and_restores_sadia(self) -> None:
+        token, tail, meta = repair_given_name_zone(
+            "PAK",
+            "WAQAR",
+            "SADTAKKKKKEEEKKKRRRRRECEK<<<<<<<",
+        )
+
+        self.assertEqual(token, "SADIA")
+        self.assertTrue(tail.startswith("<"))
+        self.assertIsNotNone(meta)
+        self.assertIn("trim_long_given_token_noise", meta["reason"])
+
+    def test_repair_td3_line1_collapses_noisy_tail_after_given_name(self) -> None:
+        repaired, repairs = repair_td3_line1(
+            "P<PAKWAQAR<<SADTAKKKKKEEEKKKRRRRRECEK<<<<<<<"
+        )
+
+        self.assertEqual(
+            repaired,
+            normalize_td3_line1("P<PAKWAQAR<<SADIA"),
+        )
+        self.assertTrue(any(r["position"] == "given_name_zone" for r in repairs))
 
     def test_repairs_noise_before_country_code(self) -> None:
         repaired, meta = repair_issuing_country_code(

@@ -189,6 +189,7 @@ DOC_NUMBER_AMBIGUOUS_SUBS = {
 }
 
 MIN_TOKEN_REPAIR_SCORE_GAIN = 6.0
+MIN_LINE1_ZONE_REPAIR_GAIN = 4.0
 
 PAIR_COUNTRY_MATCH_BONUS = 10.0
 CANDIDATE_SUPPORT_BONUS_SCALE = 3.0
@@ -842,6 +843,7 @@ def score_td3_line1(text: str) -> float:
             score += 8
             token_score = _name_token_score(first_token)
             score += max(-8, min(18, token_score))
+            score += max(-4, min(6, token_score / 4.0))
         else:
             score -= 10
 
@@ -1035,6 +1037,114 @@ def repair_given_name_token(token: str) -> tuple[str, dict]:
     }
 
 
+def _build_filler_tail(length: int) -> str:
+    if length <= 0:
+        return ""
+    return "<" * length
+
+
+def _candidate_given_zone_repairs(given_raw: str) -> list[dict]:
+    raw_first, sep, raw_tail = given_raw.partition("<")
+    raw_token = _sanitize_name_token(raw_first)
+    raw_tail_zone = _sanitize_name_zone(sep + raw_tail) if sep else ""
+
+    candidates: list[dict] = [{
+        "given_token": raw_token,
+        "given_tail": raw_tail_zone,
+        "reason": "baseline",
+    }]
+
+    if 3 <= len(raw_token) <= 12:
+        repaired_token, meta = repair_given_name_token(raw_token)
+        if meta["changed"]:
+            candidates.append({
+                "given_token": repaired_token,
+                "given_tail": raw_tail_zone,
+                "reason": "token_ambiguity_repair",
+            })
+
+    if len(raw_token) > 8:
+        max_prefix_len = min(12, len(raw_token))
+        for prefix_len in range(3, max_prefix_len + 1):
+            prefix = raw_token[:prefix_len]
+            suffix_len = len(raw_token) - prefix_len
+            filler_tail = _build_filler_tail(suffix_len + len(raw_tail_zone))
+            candidates.append({
+                "given_token": prefix,
+                "given_tail": filler_tail,
+                "reason": "trim_long_given_token_noise",
+            })
+
+            repaired_prefix, meta = repair_given_name_token(prefix)
+            if meta["changed"]:
+                candidates.append({
+                    "given_token": repaired_prefix,
+                    "given_tail": filler_tail,
+                    "reason": "trim_long_given_token_noise_with_token_repair",
+                })
+
+    deduped = {}
+    for candidate in candidates:
+        key = (candidate["given_token"], candidate["given_tail"])
+        deduped.setdefault(key, candidate)
+    return list(deduped.values())
+
+
+def repair_given_name_zone(
+    issuing_country: str,
+    surname: str,
+    given_raw: str,
+) -> tuple[str, str, dict | None]:
+    baseline_token, baseline_tail = _split_given_name_zone(given_raw)
+    baseline_line = _build_td3_line1(
+        issuing_country,
+        surname,
+        baseline_token,
+        baseline_tail,
+    )
+    baseline_score = score_td3_line1(baseline_line)
+
+    ranked = []
+    for candidate in _candidate_given_zone_repairs(given_raw):
+        given_token = candidate["given_token"]
+        given_tail = candidate["given_tail"]
+        if not given_token:
+            continue
+
+        line = _build_td3_line1(issuing_country, surname, given_token, given_tail)
+        score = score_td3_line1(line)
+        ranked.append((score, given_token, given_tail, candidate["reason"]))
+
+    if not ranked:
+        return baseline_token, baseline_tail, None
+
+    best_score, best_token, best_tail, best_reason = max(
+        ranked,
+        key=lambda item: (
+            item[0],
+            _name_token_score(item[1]),
+            -len(item[2]),
+            item[1].endswith("A"),
+            item[1],
+        ),
+    )
+
+    if (
+        (best_token, best_tail) == (baseline_token, baseline_tail)
+        or best_score < baseline_score + MIN_LINE1_ZONE_REPAIR_GAIN
+    ):
+        return baseline_token, baseline_tail, None
+
+    return best_token, best_tail, {
+        "field": "line1",
+        "position": "given_name_zone",
+        "from": f"{baseline_token}{baseline_tail}",
+        "to": f"{best_token}{best_tail}",
+        "reason": best_reason,
+        "score_gain": round(best_score - baseline_score, 2),
+    }
+
+
 def repair_issuing_country_code(line1: str) -> tuple[str, dict | None]:
     line = normalize_td3_line1(line1)
 
@@ -1104,6 +1214,16 @@ def repair_td3_line1(line1: str) -> tuple[str, list[dict]]:
 
     if not surname:
         return line, repairs
+
+    repaired_given_token, repaired_given_tail, given_zone_repair = repair_given_name_zone(
+        issuing_country,
+        surname,
+        given_raw,
+    )
+    if given_zone_repair is not None:
+        given_token = repaired_given_token
+        given_tail = repaired_given_tail
+        repairs.append(given_zone_repair)
 
     rebuilt = _build_td3_line1(issuing_country, surname, given_token, given_tail)
 
@@ -1315,6 +1435,8 @@ def run_ocr(mrz_img):
             "line1_top": line1_top,
             "line2_top": line2_top,
             "pair_count": pair_count,
+            "line1_candidate_count": len(line1_candidates),
+            "line2_candidate_count": len(line2_candidates),
             "line1_img": line1_img,
             "line2_img": line2_img,
         }
@@ -1351,8 +1473,8 @@ def run_ocr(mrz_img):
             "selected_split_score": round(best_split_bundle["split_score"], 2),
         },
         "candidate_stats": {
-            "line1_candidates": len(line1_candidates),
-            "line2_candidates": len(line2_candidates),
+            "line1_candidates": best_split_bundle["line1_candidate_count"],
+            "line2_candidates": best_split_bundle["line2_candidate_count"],
             "pairs_evaluated": pair_count,
             "line1_top": [
                 {
