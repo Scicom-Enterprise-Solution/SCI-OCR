@@ -256,7 +256,7 @@ def find_mrz_contours(
             candidates.append((x, y_orig, w, h))  # Y in original image coords
 
     if not candidates:
-        print("[Step 6] ✗ No MRZ candidates passed all filters.")
+        print("[Step 6] [FAIL] No MRZ candidates passed all filters.")
         return [], debug_records
 
     # Sort all candidates top-to-bottom by their Y coordinate.
@@ -296,7 +296,7 @@ def find_mrz_contours(
               f"vertical gap={min_gap}px")
 
     for i, bbox in enumerate(selected):
-        print(f"[Step 6] ✓ MRZ line {i+1}/{len(selected)}: bbox={bbox}")
+        print(f"[Step 6] [OK] MRZ line {i+1}/{len(selected)}: bbox={bbox}")
 
     return selected, debug_records
 

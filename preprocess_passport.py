@@ -238,7 +238,7 @@ def find_document_contour(
 
     if best_fallback_pts is not None and best_fallback_score > 0:
         quad_pts_full = best_fallback_pts * inv_scale
-        print(f"[Step 3] ✓ Selected best quadrilateral candidate with score={best_fallback_score:.3f}")
+        print(f"[Step 3] [OK] Selected best quadrilateral candidate with score={best_fallback_score:.3f}")
         print(f"[Step 3]   Detection corners: {best_fallback_pts.tolist()}")
         print(f"[Step 3]   Full-res corners:  {quad_pts_full.tolist()}")
 
@@ -249,7 +249,7 @@ def find_document_contour(
                        color=(0, 0, 255), thickness=-1)
 
     if quad_pts_full is None:
-        print("[Step 3] ✗ No quadrilateral contour detected. "
+        print("[Step 3] [FAIL] No quadrilateral contour detected. "
               "Check output/edges.png — try lowering CANNY thresholds, "
               "increasing CLOSE_KERNEL_SIZE, or decreasing MIN_AREA_FRACTION.")
 
