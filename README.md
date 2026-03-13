@@ -76,10 +76,19 @@ Important CUDA version note:
 - the `CUDA Version` shown by `nvidia-smi` is the driver/runtime capability, not the exact Paddle wheel selector
 - this project currently uses the Paddle `cu129` wheel on Linux GPU installs
 - so a machine can show `CUDA Version: 13.0` in `nvidia-smi` and still correctly use the `cu129` Paddle wheel
+- the Python environment must also contain the CUDA runtime packages expected by the installed Paddle GPU wheel
+- if the host shows a newer CUDA version than the wheel target, that is usually fine as long as the Paddle wheel and its Python-side runtime packages match each other
+- if they do not match, uninstall the current Paddle packages and reinstall the wheel set for the target runtime used by the project
 
 ```bash
 .venv/bin/python -m pip uninstall -y paddlepaddle paddlepaddle-gpu
 .venv/bin/python -m pip install -r requirements-paddle-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
+```
+
+If you want to inspect what the Python environment currently has installed:
+
+```bash
+.venv/bin/python -m pip list | grep -E 'paddle|nvidia-'
 ```
 
 Verify that the installed Paddle build can see the Linux GPU:
