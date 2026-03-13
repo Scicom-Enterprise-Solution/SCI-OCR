@@ -71,6 +71,12 @@ The project can run Stage 3 with PaddleOCR in addition to Tesseract. `OCR_BACKEN
 
 Use this when the machine has an NVIDIA GPU available to Linux and Paddle can see a CUDA device.
 
+Important CUDA version note:
+
+- the `CUDA Version` shown by `nvidia-smi` is the driver/runtime capability, not the exact Paddle wheel selector
+- this project currently uses the Paddle `cu129` wheel on Linux GPU installs
+- so a machine can show `CUDA Version: 13.0` in `nvidia-smi` and still correctly use the `cu129` Paddle wheel
+
 ```bash
 .venv/bin/python -m pip uninstall -y paddlepaddle paddlepaddle-gpu
 .venv/bin/python -m pip install -r requirements-paddle-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
