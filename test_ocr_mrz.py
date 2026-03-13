@@ -1,8 +1,19 @@
+import importlib
+import os
 import unittest
+import numpy as np
+from unittest import mock
 
 from ocr_mrz import (
     _apply_candidate_support_bonus,
+    _best_paddle_text_candidate,
+    _paddle_ocr_image,
     _pair_selection_key,
+    _prepare_variants,
+    _resolve_ocr_backends,
+    _trim_line1_spill,
+    build_split_candidates,
+    estimate_ocr_search_space,
     is_valid_mrz_country_code,
     normalize_td3_line1,
     pair_consistency_bonus,
@@ -45,6 +56,12 @@ class TestLine1Repair(unittest.TestCase):
         self.assertEqual(repaired, "SHAHADAT")
         self.assertFalse(meta["changed"])
 
+    def test_repair_given_name_token_prefers_l_over_i_for_adeela(self) -> None:
+        repaired, meta = repair_given_name_token("ADEEIA")
+
+        self.assertEqual(repaired, "ADEELA")
+        self.assertTrue(meta["changed"])
+
     def test_repair_given_name_zone_trims_ocr_noise_and_restores_sadia(self) -> None:
         token, tail, meta = repair_given_name_zone(
             "PAK",
@@ -68,6 +85,21 @@ class TestLine1Repair(unittest.TestCase):
         )
         self.assertTrue(any(r["position"] == "given_name_zone" for r in repairs))
 
+    def test_preserves_reference_given_names_for_ww_sample(self) -> None:
+        line = "P<MLIDIALLO<<FATOUMATA<ZAHARA<<<<<<<<<<<<<<<"
+
+        repaired, _ = repair_td3_line1(line)
+
+        self.assertEqual(repaired, normalize_td3_line1(line))
+
+    def test_preserves_reference_given_names_for_xcxc_sample(self) -> None:
+        line = "P<GINCAMARA<<FATOUMATA<BOBO<<<<<<<<<<<<<<<<<"
+
+        repaired, repairs = repair_td3_line1(line)
+
+        self.assertEqual(repaired, normalize_td3_line1(line))
+        self.assertEqual(repairs, [])
+
     def test_repairs_noise_before_country_code(self) -> None:
         repaired, meta = repair_issuing_country_code(
             "P<SJORALMOUSA<<AWS<WAJDI<FAROUR<<<<<<<<<<<<<"
@@ -82,6 +114,12 @@ class TestLine1Repair(unittest.TestCase):
         invalid = score_td3_line1("P<SJORALMOUSA<<AWS<WAJDI<FAROUR<<<<<<<<<<<<<")
 
         self.assertGreater(valid, invalid)
+
+    def test_score_prefers_valid_multi_token_given_names_over_trimmed_variant(self) -> None:
+        full = score_td3_line1("P<MLIDIALLO<<FATOUMATA<ZAHARA<<<<<<<<<<<<<<<")
+        trimmed = score_td3_line1("P<MLIDIALLO<<FATOUMA<<<<<<<<<<<<<<<<<<<<<<<<")
+
+        self.assertGreater(full, trimmed)
 
     def test_accepts_uto_mrz_country_code(self) -> None:
         self.assertTrue(is_valid_mrz_country_code("UTO"))
@@ -190,6 +228,115 @@ class TestPairSelection(unittest.TestCase):
         }
 
         self.assertGreater(_pair_selection_key(better_pair), _pair_selection_key(worse_pair))
+
+
+class TestOcrSearchProfiles(unittest.TestCase):
+    def test_fast_profile_limits_variant_generation(self) -> None:
+        profile = {
+            "variant_sources": ("gray", "clahe"),
+            "variant_scales": (2,),
+            "variant_thresholds": ("otsu",),
+            "split_labels": ("projection", "half"),
+        }
+        image = np.array([[0, 255], [255, 0]], dtype=np.uint8)
+
+        variants = _prepare_variants(image, "line1_test", profile)
+
+        self.assertEqual(len(variants), 2)
+        self.assertEqual(
+            {variant["variant_id"] for variant in variants},
+            {
+                "line1_test_gray_s2_otsu",
+                "line1_test_clahe_s2_otsu",
+            },
+        )
+
+    def test_fast_profile_limits_split_candidates(self) -> None:
+        profile = {
+            "variant_sources": ("gray", "clahe"),
+            "variant_scales": (2,),
+            "variant_thresholds": ("otsu",),
+            "split_labels": ("projection", "half"),
+        }
+        gray = np.zeros((20, 10), dtype=np.uint8)
+
+        candidates = build_split_candidates(gray, {"split_y": 9}, profile)
+
+        self.assertEqual(
+            [candidate["label"] for candidate in candidates],
+            ["projection", "half"],
+        )
+
+    def test_default_search_space_estimate_matches_exhaustive_profile(self) -> None:
+        search_space = estimate_ocr_search_space()
+
+        if search_space["fast_ocr"]:
+            self.assertEqual(search_space["psms"], [7])
+            self.assertEqual(search_space["split_count"], 2)
+            self.assertEqual(search_space["per_line_variants"], 2)
+            self.assertEqual(search_space["total_tesseract_calls"], 8)
+        else:
+            self.assertEqual(search_space["psms"], [7, 6, 13])
+            self.assertEqual(search_space["split_count"], 6)
+            self.assertEqual(search_space["per_line_variants"], 18)
+            self.assertEqual(search_space["total_tesseract_calls"], 648)
+
+
+class TestOcrBackendSelection(unittest.TestCase):
+    def test_backend_resolution_honors_environment(self) -> None:
+        previous = os.environ.get("OCR_BACKEND")
+        os.environ["OCR_BACKEND"] = "tesseract"
+        try:
+            import ocr_mrz
+
+            importlib.reload(ocr_mrz)
+            self.assertEqual(ocr_mrz._resolve_ocr_backends(), ["tesseract"])
+        finally:
+            if previous is None:
+                os.environ.pop("OCR_BACKEND", None)
+            else:
+                os.environ["OCR_BACKEND"] = previous
+            import ocr_mrz
+            importlib.reload(ocr_mrz)
+
+
+class TestPaddleOcrAdapter(unittest.TestCase):
+    def test_paddle_ocr_image_converts_grayscale_to_bgr(self) -> None:
+        seen = {}
+
+        class FakePaddleOCR:
+            def predict(self, img):
+                seen["shape"] = img.shape
+                return [{"rec_texts": ["P<PAKWAQAR<<SADIA"]}]
+
+        with mock.patch("ocr_mrz._get_paddle_ocr", return_value=FakePaddleOCR()):
+            text = _paddle_ocr_image(np.full((12, 24), 255, dtype=np.uint8))
+
+        self.assertEqual(seen["shape"], (12, 24, 3))
+        self.assertEqual(text, "P<PAKWAQAR<<SADIA")
+
+    def test_trim_line1_spill_removes_line2_prefix_leak(self) -> None:
+        repaired = _trim_line1_spill(
+            "P<BGDAHMAD<<ADEE<<<<<<<<<<<<<<<<<<<<<<<<<<EK"
+        )
+
+        self.assertEqual(
+            repaired,
+            "P<BGDAHMAD<<ADEE<<<<<<<<<<<<<<<<<<<<<<<<<<<<",
+        )
+
+    def test_best_paddle_line1_candidate_prefers_clean_fragment_over_joined_spill(self) -> None:
+        texts = [
+            "P<BGDAHMAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<",
+            "EK",
+        ]
+
+        best = _best_paddle_text_candidate(texts, "line1")
+
+        self.assertEqual(
+            best,
+            "P<BGDAHMAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<",
+        )
 
 
 

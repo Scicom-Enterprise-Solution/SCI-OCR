@@ -27,10 +27,15 @@ The project loads values from `.env` automatically (if present).
 - `TESSERACT_CMD` - Optional command name or full path to the Tesseract executable. If unset, the code uses `tesseract` from `PATH`.
 - `TESSERACT_LANG` - Optional Tesseract language(s), for example `eng` or `eng+ocrb`
 - `TESSERACT_OEMS` - Optional comma-separated OEM list, for example `1` or `0,1`. Legacy OEMs require legacy-capable traineddata.
+- `OCR_BACKEND` - OCR backend selection: `tesseract`, `paddle`, or `auto`
+- `PADDLEOCR_LANG` - Optional PaddleOCR language code when PaddleOCR is enabled
+- `PADDLEOCR_USE_GPU` - Optional boolean for PaddleOCR GPU inference
+- `PADDLE_PDX_CACHE_HOME` - Optional Paddle model/cache directory. Prefer a project-relative path such as `.paddlex` for portability across servers.
+- `FAST_OCR` - Optional speed-only mode. When `true`, Stage 3 uses a much smaller OCR search space for faster runs, but it can reduce name-field accuracy.
 - `PDF_PATH` - Default PDF path used when no CLI argument is provided
 - `OUTPUT_DIR` - Output folder for generated images
 
-For better MRZ accuracy, an OCR-B model can be added manually to the Tesseract tessdata directory. In this environment, `ocrb.traineddata` was installed and the local `.env` uses `eng+ocrb`.
+For better MRZ accuracy, an OCR-B model can be added manually to the Tesseract tessdata directory. In this environment, `ocrb.traineddata` was installed and the local `.env` uses `ocrb`. For accuracy-first extraction, keep `FAST_OCR=False`.
 
 Template:
 
@@ -43,12 +48,58 @@ Template:
 python run_pipeline.py <path-to-passport.pdf-or-image>
 ```
 
+For the current local setup, `FAST_OCR=False` is the default via `.env`, so a normal run uses the exhaustive OCR profile.
+
 Examples:
 
 ```bash
 python run_pipeline.py samples/sss.png
 python run_pipeline.py samples/101359705.pdf
+FAST_OCR=true python run_pipeline.py samples/xcxc.png
+FAST_OCR=false python run_pipeline.py samples/xcxc.png
+OCR_BACKEND=paddle python run_pipeline.py samples/sadia.png
+OCR_BACKEND=auto python run_pipeline.py samples/sadia.png
 ```
+
+Use `FAST_OCR=true` only for quick smoke tests. For production MRZ extraction, keep the exhaustive profile enabled.
+
+## Optional PaddleOCR Backend
+
+The project can now run Stage 3 with PaddleOCR in addition to Tesseract.
+
+Install Paddle packages into the project venv:
+
+```bash
+.venv/bin/python -m pip uninstall -y paddlepaddle
+.venv/bin/python -m pip install paddlepaddle-gpu==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
+.venv/bin/python -m pip install -r requirements-paddle.txt
+```
+
+Verify that the installed Paddle build can see the WSL GPU:
+
+```bash
+.venv/bin/python - <<'PY'
+import paddle
+print(paddle.__version__)
+print(paddle.device.is_compiled_with_cuda())
+print(paddle.device.cuda.device_count())
+PY
+```
+
+Expected result: CUDA support is `True` and the device count is at least `1`.
+
+Then run with one of:
+
+```bash
+OCR_BACKEND=paddle .venv/bin/python run_pipeline.py samples/sadia.png
+OCR_BACKEND=auto .venv/bin/python run_pipeline.py samples/sadia.png
+```
+
+Recommended:
+
+- `OCR_BACKEND=tesseract` for the current stable baseline
+- `OCR_BACKEND=paddle` to benchmark PaddleOCR only
+- `OCR_BACKEND=auto` to combine PaddleOCR and Tesseract candidates
 
 ## Tests
 

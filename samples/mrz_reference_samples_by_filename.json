@@ -1,160 +1,46 @@
 {
   "11.png": {
-    "legacy_sample_id": 2,
     "line1": "P<BGDRABBY<<MD<MOSTAHIDUL<ISLAM<<<<<<<<<<<<<",
-    "line2": "A142017137BGD0203317M34022694214826200<<<<76",
-    "notes": "Extracted from screenshot set.",
-    "parsed": {
-      "document_code": "P<",
-      "issuing_state": "BGD",
-      "surname": "RABBY",
-      "given_names": [
-        "MD",
-        "MOSTAHIDUL",
-        "ISLAM"
-      ],
-      "passport_number": "A14201713",
-      "passport_number_check_digit": "7",
-      "nationality": "BGD",
-      "date_of_birth_raw": "020331",
-      "date_of_birth_check_digit": "7",
-      "sex": "M",
-      "expiry_date_raw": "340226",
-      "expiry_date_check_digit": "9",
-      "personal_number": "4214826200<<<<",
-      "personal_number_check_digit": "7",
-      "final_check_digit": "6"
-    }
+    "line2": "A142017137BGD0203317M34022694214826200<<<<76"
+  },
+  "adeela_new.png": {
+    "line1": "P<BGDAHMAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<",
+    "line2": "A216182761BGD1703191F31013117121338310439948"
+  },
+  "adeela_old.png": {
+    "line1": "P<BGDAHMAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<",
+    "line2": "EK01488182BGD1703191F2701253<<<<<<<<<<<<<<06"
+  },
+  "inam_new.png": {
+    "line1": "P<BGDAHAMED<<INAM<<<<<<<<<<<<<<<<<<<<<<<<<<<",
+    "line2": "A216182772BGD8201010M36013168683510559<<<<22"
+  },
+  "inam_old.png": {
+    "line1": "P<BGDAHAMED<<INAM<<<<<<<<<<<<<<<<<<<<<<<<<<<",
+    "line2": "EK01482490BGD8201010M27012531213383168395<12"
   },
   "sasa.png": {
-    "legacy_sample_id": 3,
     "line1": "P<INDMURMU<<ANGELYN<LILY<SANA<<<<<<<<<<<<<<<",
-    "line2": "AI929233<6IND0704065F36020140075940579626<08",
-    "notes": "Extracted from screenshot set.",
-    "parsed": {
-      "document_code": "P<",
-      "issuing_state": "IND",
-      "surname": "MURMU",
-      "given_names": [
-        "ANGELYN",
-        "LILY",
-        "SANA"
-      ],
-      "passport_number": "AI929233<",
-      "passport_number_check_digit": "6",
-      "nationality": "IND",
-      "date_of_birth_raw": "070406",
-      "date_of_birth_check_digit": "5",
-      "sex": "F",
-      "expiry_date_raw": "360201",
-      "expiry_date_check_digit": "4",
-      "personal_number": "0075940579626<",
-      "personal_number_check_digit": "0",
-      "final_check_digit": "8"
-    }
+    "line2": "AI929233<6IND0704065F36020140075940579626<08"
+  },
+  "sadia.png": {
+    "line1": "P<PAKWAQAR<<SADIA<<<<<<<<<<<<<<<<<<<<<<<<<<<",
+    "line2": "AP63227825PAK8909257F29022453340206172788<18"
   },
   "sasas.png": {
-    "legacy_sample_id": 4,
     "line1": "P<JORALMOUSA<<AWS<WAJDI<FAROUQ<<<<<<<<<<<<<<",
-    "line2": "T1493973<9JOR0706265M31030839000186766<<<<56",
-    "notes": "Extracted from screenshot set.",
-    "parsed": {
-      "document_code": "P<",
-      "issuing_state": "JOR",
-      "surname": "ALMOUSA",
-      "given_names": [
-        "AWS",
-        "WAJDI",
-        "FAROUQ"
-      ],
-      "passport_number": "T1493973<",
-      "passport_number_check_digit": "9",
-      "nationality": "JOR",
-      "date_of_birth_raw": "070626",
-      "date_of_birth_check_digit": "5",
-      "sex": "M",
-      "expiry_date_raw": "310308",
-      "expiry_date_check_digit": "3",
-      "personal_number": "9000186766<<<<",
-      "personal_number_check_digit": "5",
-      "final_check_digit": "6"
-    }
+    "line2": "T1493973<9JOR0706265M31030839000186766<<<<56"
   },
   "sss.png": {
-    "legacy_sample_id": 1,
     "line1": "P<BGDALAM<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<",
-    "line2": "A098919372BGD0601038M36020815119012168<<<<26",
-    "notes": "Extracted from screenshot set; line2 ending normalized to 44-char TD3 format.",
-    "parsed": {
-      "document_code": "P<",
-      "issuing_state": "BGD",
-      "surname": "ALAM",
-      "given_names": [
-        "SHAHADAT"
-      ],
-      "passport_number": "A09891937",
-      "passport_number_check_digit": "2",
-      "nationality": "BGD",
-      "date_of_birth_raw": "060103",
-      "date_of_birth_check_digit": "8",
-      "sex": "M",
-      "expiry_date_raw": "360208",
-      "expiry_date_check_digit": "1",
-      "personal_number": "5119012168<<<<",
-      "personal_number_check_digit": "2",
-      "final_check_digit": "6"
-    }
+    "line2": "A098919372BGD0601038M36020815119012168<<<<26"
   },
   "ww.png": {
-    "legacy_sample_id": 5,
     "line1": "P<MLIDIALLO<<FATOUMATA<ZAHARA<<<<<<<<<<<<<<<",
-    "line2": "PP00242392MLI0608118F31010672060910200913878",
-    "notes": "Extracted from screenshot set.",
-    "parsed": {
-      "document_code": "P<",
-      "issuing_state": "MLI",
-      "surname": "DIALLO",
-      "given_names": [
-        "FATOUMATA",
-        "ZAHARA"
-      ],
-      "passport_number": "PP0024239",
-      "passport_number_check_digit": "2",
-      "nationality": "MLI",
-      "date_of_birth_raw": "060811",
-      "date_of_birth_check_digit": "8",
-      "sex": "F",
-      "expiry_date_raw": "310106",
-      "expiry_date_check_digit": "7",
-      "personal_number": "20609102009138",
-      "personal_number_check_digit": "7",
-      "final_check_digit": "8"
-    }
+    "line2": "PP00242392MLI0608118F31010672060910200913878"
   },
   "xcxc.png": {
-    "legacy_sample_id": 6,
     "line1": "P<GINCAMARA<<FATOUMATA<BOBO<<<<<<<<<<<<<<<<<",
-    "line2": "O007341557GIN0012083F27051142001208017021578",
-    "notes": "Extracted from screenshot set.",
-    "parsed": {
-      "document_code": "P<",
-      "issuing_state": "GIN",
-      "surname": "CAMARA",
-      "given_names": [
-        "FATOUMATA",
-        "BOBO"
-      ],
-      "passport_number": "O00734155",
-      "passport_number_check_digit": "7",
-      "nationality": "GIN",
-      "date_of_birth_raw": "001208",
-      "date_of_birth_check_digit": "3",
-      "sex": "F",
-      "expiry_date_raw": "270511",
-      "expiry_date_check_digit": "4",
-      "personal_number": "20012080170215",
-      "personal_number_check_digit": "7",
-      "final_check_digit": "8"
-    }
+    "line2": "O007341557GIN0012083F27051142001208017021578"
   }
 }

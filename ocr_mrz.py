@@ -3,6 +3,7 @@ import re
 import math
 import shutil
 import itertools
+import inspect
 import cv2
 import pytesseract
 import numpy as np
@@ -56,6 +57,36 @@ if resolved_tesseract_cmd:
 MRZ_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
 MRZ_LINE_LEN = 44
 TESSERACT_LANG = os.getenv("TESSERACT_LANG", "eng").strip() or "eng"
+OCR_BACKEND = os.getenv("OCR_BACKEND", "tesseract").strip().lower() or "tesseract"
+PADDLEOCR_LANG = os.getenv("PADDLEOCR_LANG", "en").strip() or "en"
+
+
+def _parse_bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "")
+    if not raw.strip():
+        return default
+
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+PADDLEOCR_USE_GPU = _parse_bool_env("PADDLEOCR_USE_GPU", False)
+
+
+def _resolve_paddle_cache_home() -> str:
+    env_cache = os.getenv("PADDLE_PDX_CACHE_HOME", "").strip()
+    if env_cache:
+        return env_cache
+
+    return os.path.abspath(os.path.join(os.getcwd(), ".paddlex"))
+
+
+def _should_disable_paddle_model_source_check(paddle_cache_home: str) -> bool:
+    env_value = os.getenv("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "").strip()
+    if env_value:
+        return env_value.lower() in {"1", "true", "yes", "on"}
+
+    official_models_dir = os.path.join(paddle_cache_home, "official_models")
+    return os.path.isdir(official_models_dir)
 
 
 def _parse_int_list_env(name: str, default: list[int]) -> list[int]:
@@ -130,7 +161,11 @@ def _resolve_oems(lang: str) -> list[int]:
     return [1]
 
 
-TESSERACT_PSMS = _parse_int_list_env("TESSERACT_PSMS", [7, 6, 13])
+FAST_OCR = _parse_bool_env("FAST_OCR", False)
+TESSERACT_PSMS = _parse_int_list_env(
+    "TESSERACT_PSMS",
+    [7] if FAST_OCR else [7, 6, 13],
+)
 TESSERACT_OEMS = _resolve_oems(TESSERACT_LANG)
 
 OCR_CONFIGS = [
@@ -158,8 +193,10 @@ AMBIGUOUS_FIELD_SUBS = {
 
 TOKEN_AMBIGUOUS_SUBS = {
     "T": ("I",),
-    "I": ("T",),
+    "I": ("L",),
     "L": ("I",),
+    "M": ("N",),
+    "N": ("M",),
 }
 
 COUNTRY_CODE_AMBIGUOUS_SUBS = {
@@ -193,6 +230,13 @@ MIN_LINE1_ZONE_REPAIR_GAIN = 4.0
 
 PAIR_COUNTRY_MATCH_BONUS = 10.0
 CANDIDATE_SUPPORT_BONUS_SCALE = 3.0
+
+FAST_OCR_VARIANT_SOURCES = ("gray", "clahe")
+FAST_OCR_VARIANT_SCALES = (2,)
+FAST_OCR_VARIANT_THRESHOLDS = ("otsu",)
+FAST_OCR_SPLIT_LABELS = ("projection", "half")
+PADDLE_OCR_BACKEND_LABEL = "paddle"
+_PADDLE_OCR_INSTANCE = None
 
 
 # -------------------------------------------------------
@@ -249,6 +293,25 @@ def _sanitize_name_token(token: str) -> str:
 
 def _sanitize_name_zone(value: str) -> str:
     return re.sub(r"[^A-Z<]", "", normalize_mrz(value))
+
+
+def _split_tail_name_tokens(value: str) -> tuple[list[str], str]:
+    zone = _sanitize_name_zone(value)
+    trimmed = zone.strip("<")
+    if not trimmed:
+        return [], zone
+
+    raw_parts = [part for part in trimmed.split("<") if part]
+    tokens = [_sanitize_name_token(part) for part in raw_parts]
+    tokens = [token for token in tokens if token]
+
+    if not tokens:
+        return [], zone
+
+    rebuilt = "<" + "<".join(tokens)
+    suffix_len = max(0, len(zone) - len(rebuilt))
+    remainder = "<" * suffix_len
+    return tokens, remainder
 
 
 def _generate_country_code_variants(code: str) -> set[str]:
@@ -518,35 +581,75 @@ def _resize(img, scale: int):
     return cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
 
-def _prepare_variants(gray, prefix: str):
+def _ocr_search_profile() -> dict:
+    if FAST_OCR:
+        return {
+            "variant_sources": FAST_OCR_VARIANT_SOURCES,
+            "variant_scales": FAST_OCR_VARIANT_SCALES,
+            "variant_thresholds": FAST_OCR_VARIANT_THRESHOLDS,
+            "split_labels": FAST_OCR_SPLIT_LABELS,
+        }
+
+    return {
+        "variant_sources": ("gray", "clahe"),
+        "variant_scales": (2, 3, 4),
+        "variant_thresholds": ("otsu", "adaptive", "otsu_thick"),
+        "split_labels": (
+            "projection",
+            "half",
+            "projection_m4",
+            "projection_p4",
+            "projection_m8",
+            "projection_p8",
+        ),
+    }
+
+
+def _prepare_variants(gray, prefix: str, profile: dict | None = None):
+    profile = profile or _ocr_search_profile()
     variants = []
 
-    for source_name, base in [
-        ("gray", gray),
-        ("clahe", _apply_clahe(gray)),
-    ]:
-        for scale in [2, 3, 4]:
+    variant_sources = profile["variant_sources"]
+    base_images = {"gray": gray}
+    if "clahe" in variant_sources:
+        base_images["clahe"] = _apply_clahe(gray)
+
+    for source_name in variant_sources:
+        base = base_images[source_name]
+        for scale in profile["variant_scales"]:
             scaled = _resize(base, scale)
 
-            otsu = _otsu_thresh(scaled)
-            adaptive = _adaptive_thresh(scaled)
-            otsu_thick = _thicken(otsu)
+            otsu = None
+            for threshold_name in profile["variant_thresholds"]:
+                if threshold_name == "otsu":
+                    if otsu is None:
+                        otsu = _otsu_thresh(scaled)
+                    image = otsu
+                    morph = "none"
+                    threshold = "otsu"
+                elif threshold_name == "adaptive":
+                    image = _adaptive_thresh(scaled)
+                    morph = "none"
+                    threshold = "adaptive"
+                elif threshold_name == "otsu_thick":
+                    if otsu is None:
+                        otsu = _otsu_thresh(scaled)
+                    image = _thicken(otsu)
+                    morph = "dilate"
+                    threshold = "otsu"
+                else:
+                    continue
 
-            variants.append({
-                "variant_id": f"{prefix}_{source_name}_s{scale}_otsu",
-                "image": otsu,
-                "meta": {"scale": scale, "source": source_name, "threshold": "otsu", "morph": "none"},
-            })
-            variants.append({
-                "variant_id": f"{prefix}_{source_name}_s{scale}_adaptive",
-                "image": adaptive,
-                "meta": {"scale": scale, "source": source_name, "threshold": "adaptive", "morph": "none"},
-            })
-            variants.append({
-                "variant_id": f"{prefix}_{source_name}_s{scale}_otsu_thick",
-                "image": otsu_thick,
-                "meta": {"scale": scale, "source": source_name, "threshold": "otsu", "morph": "dilate"},
-            })
+                variants.append({
+                    "variant_id": f"{prefix}_{source_name}_s{scale}_{threshold_name}",
+                    "image": image,
+                    "meta": {
+                        "scale": scale,
+                        "source": source_name,
+                        "threshold": threshold,
+                        "morph": morph,
+                    },
+                })
 
     return variants
 
@@ -628,7 +731,8 @@ def split_mrz_lines_at(gray, split_y: int):
     return line1, line2
 
 
-def build_split_candidates(gray, base_meta: dict):
+def build_split_candidates(gray, base_meta: dict, profile: dict | None = None):
+    profile = profile or _ocr_search_profile()
     h = gray.shape[0]
     proj_y = int(base_meta.get("split_y", h // 2))
     half_y = h // 2
@@ -636,14 +740,17 @@ def build_split_candidates(gray, base_meta: dict):
     candidates = []
     seen = set()
 
-    for label, y in [
-        ("projection", proj_y),
-        ("half", half_y),
-        ("projection_m4", proj_y - 4),
-        ("projection_p4", proj_y + 4),
-        ("projection_m8", proj_y - 8),
-        ("projection_p8", proj_y + 8),
-    ]:
+    split_positions = {
+        "projection": proj_y,
+        "half": half_y,
+        "projection_m4": proj_y - 4,
+        "projection_p4": proj_y + 4,
+        "projection_m8": proj_y - 8,
+        "projection_p8": proj_y + 8,
+    }
+
+    for label in profile["split_labels"]:
+        y = split_positions[label]
         y = max(8, min(h - 8, y))
         if y in seen:
             continue
@@ -660,6 +767,27 @@ def build_split_candidates(gray, base_meta: dict):
         })
 
     return candidates
+
+
+def estimate_ocr_search_space() -> dict:
+    profile = _ocr_search_profile()
+    per_line_variants = (
+        len(profile["variant_sources"])
+        * len(profile["variant_scales"])
+        * len(profile["variant_thresholds"])
+    )
+    per_line_attempts = per_line_variants * len(OCR_CONFIGS)
+    split_count = len(profile["split_labels"])
+
+    return {
+        "fast_ocr": FAST_OCR,
+        "psms": list(TESSERACT_PSMS),
+        "oems": list(TESSERACT_OEMS),
+        "split_count": split_count,
+        "per_line_variants": per_line_variants,
+        "per_line_attempts": per_line_attempts,
+        "total_tesseract_calls": split_count * 2 * per_line_attempts,
+    }
 
 
 # -------------------------------------------------------
@@ -680,33 +808,250 @@ def _ocr_image(img, cfg: str) -> str:
     return normalize_mrz(text)
 
 
+def _resolve_ocr_backends() -> list[str]:
+    backend = OCR_BACKEND
+    if backend in {"tesseract", "paddle"}:
+        return [backend]
+    if backend in {"auto", "hybrid", "both"}:
+        return ["tesseract", "paddle"]
+    print(f"[WARN] Unknown OCR_BACKEND='{backend}', falling back to tesseract")
+    return ["tesseract"]
+
+
+def _get_paddle_ocr():
+    global _PADDLE_OCR_INSTANCE
+
+    if _PADDLE_OCR_INSTANCE is not None:
+        return _PADDLE_OCR_INSTANCE
+
+    paddle_cache_home = _resolve_paddle_cache_home()
+    os.environ["PADDLE_PDX_CACHE_HOME"] = paddle_cache_home
+    os.makedirs(paddle_cache_home, exist_ok=True)
+    if _should_disable_paddle_model_source_check(paddle_cache_home):
+        os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+
+    try:
+        from paddleocr import PaddleOCR
+    except ImportError as exc:
+        raise RuntimeError(
+            "PaddleOCR backend requested but 'paddleocr' is not installed in the active environment"
+        ) from exc
+
+    kwargs = {"lang": PADDLEOCR_LANG}
+    signature = inspect.signature(PaddleOCR.__init__)
+
+    if "use_gpu" in signature.parameters:
+        kwargs["use_gpu"] = PADDLEOCR_USE_GPU
+    if "show_log" in signature.parameters:
+        kwargs["show_log"] = False
+    if "use_doc_orientation_classify" in signature.parameters:
+        kwargs["use_doc_orientation_classify"] = False
+    if "use_doc_unwarping" in signature.parameters:
+        kwargs["use_doc_unwarping"] = False
+    if "use_textline_orientation" in signature.parameters:
+        kwargs["use_textline_orientation"] = False
+    if "ocr_version" in signature.parameters:
+        kwargs["ocr_version"] = "PP-OCRv5"
+
+    _PADDLE_OCR_INSTANCE = PaddleOCR(**kwargs)
+    return _PADDLE_OCR_INSTANCE
+
+
+def _extract_paddle_lines(result) -> list[str]:
+    texts = []
+
+    def walk(node):
+        if node is None:
+            return
+
+        if isinstance(node, str):
+            text = normalize_mrz(node)
+            if text:
+                texts.append(text)
+            return
+
+        if isinstance(node, dict):
+            for key in ("rec_texts", "texts"):
+                values = node.get(key)
+                if isinstance(values, list):
+                    for value in values:
+                        walk(value)
+                    return
+
+            text = node.get("rec_text") or node.get("text")
+            if isinstance(text, str):
+                walk(text)
+                return
+
+            for value in node.values():
+                walk(value)
+            return
+
+        if isinstance(node, (list, tuple)):
+            if len(node) == 2 and isinstance(node[1], (list, tuple)):
+                if node[1] and isinstance(node[1][0], str):
+                    walk(node[1][0])
+                    return
+            for value in node:
+                walk(value)
+
+    walk(result)
+    return texts
+
+
+def _trim_line1_spill(text: str) -> str:
+    text = normalize_td3_line1(text)
+
+    # Clean line-2 spill such as "...<<<<<<<<EK" that can appear when
+    # PaddleOCR leaks the document-number prefix into line 1.
+    text = re.sub(r"<{4,}[A-Z0-9]{1,6}$", lambda m: "<" * len(m.group(0)), text)
+
+    if "<<" not in text:
+        return text
+
+    name_zone = text[5:]
+    if any(ch.isdigit() for ch in name_zone):
+        digits = sum(ch.isdigit() for ch in name_zone)
+        text = normalize_td3_line1(re.sub(r"[0-9]", "<", text))
+        if digits >= 2:
+            return text
+
+    return text
+
+
+def _best_paddle_text_candidate(texts: list[str], line_kind: str) -> str:
+    cleaned = [normalize_mrz(text) for text in texts if normalize_mrz(text)]
+    if not cleaned:
+        return ""
+
+    candidates = []
+    seen = set()
+
+    def add_candidate(text: str) -> None:
+        if not text or text in seen:
+            return
+        seen.add(text)
+        candidates.append(text)
+
+    for text in cleaned:
+        add_candidate(text)
+        for fragment in re.findall(r"[A-Z0-9<]{6,}", text):
+            add_candidate(fragment)
+
+    joined = normalize_mrz("".join(cleaned))
+    add_candidate(joined)
+
+    if line_kind == "line1":
+        scored = []
+        for cand in candidates:
+            trimmed = _trim_line1_spill(cand)
+            score = score_td3_line1(trimmed)
+            if any(ch.isdigit() for ch in trimmed[5:]):
+                score -= 80.0
+            if re.search(r"<{4,}[A-Z0-9]{1,6}$", cand):
+                score -= 40.0
+            scored.append((score, trimmed))
+        return max(scored, key=lambda item: item[0])[1]
+
+    scored = []
+    for cand in candidates:
+        normalized = normalize_td3_line2(cand)
+        score, checks = score_td3_line2(normalized)
+        if not re.match(r"^[A-Z0-9<]{1,2}[A-Z0-9<]{7,}", normalized):
+            score -= 20.0
+        score += checks.get("passed_count", 0) * 5.0
+        scored.append((score, normalized))
+
+    return max(scored, key=lambda item: item[0])[1]
+
+
+def _paddle_ocr_image(img, line_kind: str | None = None) -> str:
+    ocr = _get_paddle_ocr()
+    paddle_img = img
+
+    # PaddleOCR expects an HWC image for array input; Stage 3 variants are often grayscale.
+    if isinstance(paddle_img, np.ndarray) and paddle_img.ndim == 2:
+        paddle_img = cv2.cvtColor(paddle_img, cv2.COLOR_GRAY2BGR)
+
+    if hasattr(ocr, "predict"):
+        try:
+            result = ocr.predict(paddle_img)
+        except NotImplementedError as exc:
+            raise RuntimeError(
+                "Installed Paddle runtime failed during CPU inference. "
+                "This project expects the official PaddleOCR-supported runtime; "
+                "reinstall the pinned versions from requirements-paddle.txt in .venv."
+            ) from exc
+    elif hasattr(ocr, "ocr"):
+        try:
+            result = ocr.ocr(paddle_img, cls=False)
+        except NotImplementedError as exc:
+            raise RuntimeError(
+                "Installed Paddle runtime failed during CPU inference. "
+                "This project expects the official PaddleOCR-supported runtime; "
+                "reinstall the pinned versions from requirements-paddle.txt in .venv."
+            ) from exc
+    else:
+        raise RuntimeError("Unsupported PaddleOCR instance: missing predict/ocr method")
+
+    texts = _extract_paddle_lines(result)
+    if not texts:
+        return ""
+
+    if line_kind in {"line1", "line2"}:
+        return _best_paddle_text_candidate(texts, line_kind)
+
+    return normalize_mrz("".join(texts))
+
+
 def generate_ocr_candidates(line_img, prefix: str):
     gray = _to_gray(line_img)
     variants = _prepare_variants(gray, prefix)
+    backends = _resolve_ocr_backends()
+    line_kind = "line1" if prefix.startswith("line1_") else "line2" if prefix.startswith("line2_") else None
 
     candidates = []
     seen = set()
 
     for v in variants:
-        for c in OCR_CONFIGS:
-            text = _ocr_image(v["image"], c["cfg"])
-            if not text:
-                continue
+        if "tesseract" in backends:
+            for c in OCR_CONFIGS:
+                text = _ocr_image(v["image"], c["cfg"])
+                if not text:
+                    continue
 
-            norm = normalize_mrz(text)
-            key = (norm, v["variant_id"], c["psm"])
-            if key in seen:
-                continue
-            seen.add(key)
+                norm = normalize_mrz(text)
+                key = ("tesseract", norm, v["variant_id"], c["psm"])
+                if key in seen:
+                    continue
+                seen.add(key)
 
-            candidates.append({
-                "text_raw": text,
-                "text": norm,
-                "variant_id": v["variant_id"],
-                "variant_meta": v["meta"],
-                "psm": c["psm"],
-                "image": v["image"],
-            })
+                candidates.append({
+                    "backend": "tesseract",
+                    "text_raw": text,
+                    "text": norm,
+                    "variant_id": v["variant_id"],
+                    "variant_meta": v["meta"],
+                    "psm": c["psm"],
+                    "image": v["image"],
+                })
+
+        if "paddle" in backends:
+            text = _paddle_ocr_image(v["image"], line_kind=line_kind)
+            if text:
+                norm = normalize_mrz(text)
+                key = ("paddle", norm, v["variant_id"], PADDLE_OCR_BACKEND_LABEL)
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append({
+                        "backend": "paddle",
+                        "text_raw": text,
+                        "text": norm,
+                        "variant_id": v["variant_id"],
+                        "variant_meta": v["meta"],
+                        "psm": PADDLE_OCR_BACKEND_LABEL,
+                        "image": v["image"],
+                    })
 
     return candidates
 
@@ -715,7 +1060,10 @@ def _candidate_support_bonus(support_count: int) -> float:
     if support_count <= 1:
         return 0.0
 
-    return math.log2(support_count) * CANDIDATE_SUPPORT_BONUS_SCALE
+    # Strong consensus across OCR variants is a high-signal indicator that the
+    # text is real, especially for line 1 where noisy single-variant winners
+    # can otherwise outrank the correct MRZ string.
+    return (math.log2(support_count) ** 2) * CANDIDATE_SUPPORT_BONUS_SCALE
 
 
 def _apply_candidate_support_bonus(candidates) -> None:
@@ -749,6 +1097,19 @@ def _max_consonant_run(token: str) -> int:
         else:
             cur += 1
             best = max(best, cur)
+    return best
+
+
+def _max_vowel_run(token: str) -> int:
+    vowels = set("AEIOUY")
+    best = 0
+    cur = 0
+    for ch in token:
+        if ch in vowels:
+            cur += 1
+            best = max(best, cur)
+        else:
+            cur = 0
     return best
 
 
@@ -791,6 +1152,7 @@ def _name_token_score(token: str) -> float:
             score -= 6
 
     score -= max(0, _max_consonant_run(token) - 2) * 6
+    score -= max(0, _max_vowel_run(token) - 2) * 8
 
     for ch in set(token):
         count = token.count(ch)
@@ -847,7 +1209,15 @@ def score_td3_line1(text: str) -> float:
         else:
             score -= 10
 
-        tail_letters = sum(1 for c in filler_tail if "A" <= c <= "Z")
+        tail_tokens, tail_remainder = _split_tail_name_tokens(filler_tail)
+        for tail_token in tail_tokens:
+            token_score = _name_token_score(tail_token)
+            score += 6
+            score += max(-6, min(14, token_score))
+            if 2 <= len(tail_token) <= 12:
+                score += 4
+
+        tail_letters = sum(1 for c in tail_remainder if "A" <= c <= "Z")
         tail_fillers = filler_tail.count("<")
         score -= tail_letters * 2.5
         if tail_fillers >= max(6, len(filler_tail) // 2):
@@ -1193,7 +1563,7 @@ def repair_issuing_country_code(line1: str) -> tuple[str, dict | None]:
 
 def repair_td3_line1(line1: str) -> tuple[str, list[dict]]:
     repairs = []
-    line = normalize_td3_line1(line1)
+    line = _trim_line1_spill(line1)
 
     if not line.startswith("P<"):
         return line, repairs
@@ -1214,6 +1584,20 @@ def repair_td3_line1(line1: str) -> tuple[str, list[dict]]:
 
     if not surname:
         return line, repairs
+
+    if 3 <= len(surname) <= 10:
+        repaired_surname, meta = repair_given_name_token(surname)
+        if meta["changed"]:
+            repairs.append({
+                "field": "line1",
+                "position": "surname",
+                "from": surname,
+                "to": repaired_surname,
+                "reason": meta["reason"],
+                "candidates_considered": meta["candidates_considered"],
+                "best_score": meta["best_score"],
+            })
+            surname = repaired_surname
 
     repaired_given_token, repaired_given_tail, given_zone_repair = repair_given_name_zone(
         issuing_country,
@@ -1350,8 +1734,20 @@ def run_ocr(mrz_img):
 
     line1_img_base, line2_img_base, split_meta = split_mrz_lines(gray)
 
+    search_space = estimate_ocr_search_space()
+    print(
+        "[OCR] Search profile: "
+        f"fast={search_space['fast_ocr']} "
+        f"psms={search_space['psms']} "
+        f"splits={search_space['split_count']} "
+        f"per_line_variants={search_space['per_line_variants']} "
+        f"estimated_tesseract_calls={search_space['total_tesseract_calls']}"
+    )
+
     split_candidates = build_split_candidates(gray, split_meta)
-    best_split_bundle = None
+    all_line1_candidates = []
+    all_line2_candidates = []
+    split_summaries = []
 
     for split_info in split_candidates:
         split_y = split_info["split_y"]
@@ -1361,14 +1757,15 @@ def run_ocr(mrz_img):
         line2_candidates = generate_ocr_candidates(line2_img, f"line2_{split_info['label']}")
 
         for cand in line1_candidates:
-            text = normalize_td3_line1(cand["text"])
+            text = _trim_line1_spill(cand["text"])
             repaired, repairs = repair_td3_line1(text)
-            cand["text"] = repaired
+            cand["text"] = _trim_line1_spill(repaired)
             cand["repairs"] = repairs
-            cand["score"] = score_td3_line1(repaired)
+            cand["score"] = score_td3_line1(cand["text"])
             cand["checksum_pass_count"] = None
-
-        _apply_candidate_support_bonus(line1_candidates)
+            cand["split_label"] = split_info["label"]
+            cand["split_y"] = split_info["split_y"]
+            all_line1_candidates.append(cand)
 
         for cand in line2_candidates:
             text = normalize_td3_line2(cand["text"])
@@ -1377,87 +1774,98 @@ def run_ocr(mrz_img):
             cand["checks"] = checks
             cand["score"] = score_td3_line2(repaired)[0]
             cand["checksum_pass_count"] = checks["passed_count"]
+            cand["split_label"] = split_info["label"]
+            cand["split_y"] = split_info["split_y"]
+            all_line2_candidates.append(cand)
 
         if not line1_candidates or not line2_candidates:
             continue
 
         line1_ranked = _rank_candidates(line1_candidates, "score")
         line2_ranked = _rank_candidates(line2_candidates, "score")
-
-        line1_top = line1_ranked[:5]
-        line2_top = line2_ranked[:5]
-
-        best_pair = None
-        pair_count = 0
-
-        for c1 in line1_ranked:
-            for c2 in line2_ranked:
-                pair_count += 1
-                checks = c2.get("checks") or validate_td3_checks(c2["text"])
-                pair_bonus = pair_consistency_bonus(c1["text"], c2["text"])
-                pair_score = (
-                    c1["score"]
-                    + c2["score"]
-                    + (checks["passed_count"] * 4.0)
-                    + pair_bonus
-                )
-
-                candidate_pair = {
-                    "line1": c1,
-                    "line2": c2,
-                    "pair_score": pair_score,
-                    "pair_bonus": pair_bonus,
-                    "checks": checks,
-                    "repairs_applied": list(c1.get("repairs", [])),
-                }
-
-                candidate_key = _pair_selection_key(candidate_pair)
-                best_key = None
-                if best_pair is not None:
-                    best_key = _pair_selection_key(best_pair)
-
-                if best_pair is None or candidate_key > best_key:
-                    best_pair = candidate_pair
-
-        if best_pair is None:
-            continue
-
+        best_line2_for_split = line2_ranked[0]
         split_score = score_split_quality(
             split_info,
-            best_pair["checks"],
-            best_pair["line2"]["score"],
+            best_line2_for_split["checks"],
+            best_line2_for_split["score"],
         )
-
-        bundle = {
+        split_summaries.append({
             "split_info": split_info,
             "split_score": split_score,
-            "best_pair": best_pair,
-            "line1_top": line1_top,
-            "line2_top": line2_top,
-            "pair_count": pair_count,
             "line1_candidate_count": len(line1_candidates),
             "line2_candidate_count": len(line2_candidates),
             "line1_img": line1_img,
             "line2_img": line2_img,
-        }
+        })
 
-        if best_split_bundle is None or bundle["split_score"] > best_split_bundle["split_score"]:
-            best_split_bundle = bundle
-
-    if best_split_bundle is None:
+    if not all_line1_candidates or not all_line2_candidates:
         raise RuntimeError("No valid split candidates produced OCR results")
 
-    best_pair = best_split_bundle["best_pair"]
-    line1_top = best_split_bundle["line1_top"]
-    line2_top = best_split_bundle["line2_top"]
-    pair_count = best_split_bundle["pair_count"]
+    _apply_candidate_support_bonus(all_line1_candidates)
+
+    line1_ranked = _rank_candidates(all_line1_candidates, "score")
+    line2_ranked = _rank_candidates(all_line2_candidates, "score")
+    line1_top = line1_ranked[:5]
+    line2_top = line2_ranked[:5]
+
+    best_pair = None
+    pair_count = 0
+
+    for c1 in line1_ranked:
+        for c2 in line2_ranked:
+            pair_count += 1
+            checks = c2.get("checks") or validate_td3_checks(c2["text"])
+            pair_bonus = pair_consistency_bonus(c1["text"], c2["text"])
+            pair_score = (
+                c1["score"]
+                + c2["score"]
+                + (checks["passed_count"] * 4.0)
+                + pair_bonus
+            )
+
+            candidate_pair = {
+                "line1": c1,
+                "line2": c2,
+                "pair_score": pair_score,
+                "pair_bonus": pair_bonus,
+                "checks": checks,
+                "repairs_applied": list(c1.get("repairs", [])),
+            }
+
+            candidate_key = _pair_selection_key(candidate_pair)
+            best_key = None
+            if best_pair is not None:
+                best_key = _pair_selection_key(best_pair)
+
+            if best_pair is None or candidate_key > best_key:
+                best_pair = candidate_pair
+
+    if best_pair is None:
+        raise RuntimeError("No valid line pair selected from OCR candidates")
+
+    selected_line1_split = best_pair["line1"]["split_label"]
+    selected_line2_split = best_pair["line2"]["split_label"]
+    selected_line1_y = best_pair["line1"]["split_y"]
+    selected_line2_y = best_pair["line2"]["split_y"]
+
+    selected_line1_img, _ = split_mrz_lines_at(gray, selected_line1_y)
+    _, selected_line2_img = split_mrz_lines_at(gray, selected_line2_y)
+
+    selected_split_summary = next(
+        (
+            summary
+            for summary in split_summaries
+            if summary["split_info"]["label"] == selected_line2_split
+        ),
+        None,
+    )
 
     best_line1 = best_pair["line1"]["text"]
     best_line2 = best_pair["line2"]["text"]
     checks = best_pair["checks"]
 
-    save(best_split_bundle["line1_img"], "mrz_line1.png")
-    save(best_split_bundle["line2_img"], "mrz_line2.png")
+    save(selected_line1_img, "mrz_line1.png")
+    save(selected_line2_img, "mrz_line2.png")
     save(best_pair["line1"]["image"], "best_variant_line1.png")
     save(best_pair["line2"]["image"], "best_variant_line2.png")
 
@@ -1466,15 +1874,22 @@ def run_ocr(mrz_img):
     ocr_meta = {
         "split": {
             **split_meta,
-            "selected_label": best_split_bundle["split_info"]["label"],
-            "selected_split_y": best_split_bundle["split_info"]["split_y"],
-            "selected_top_ratio": round(best_split_bundle["split_info"]["top_ratio"], 3),
-            "selected_bottom_ratio": round(best_split_bundle["split_info"]["bottom_ratio"], 3),
-            "selected_split_score": round(best_split_bundle["split_score"], 2),
+            "selected_label": selected_line2_split,
+            "selected_split_y": selected_line2_y,
+            "selected_top_ratio": round(selected_split_summary["split_info"]["top_ratio"], 3)
+            if selected_split_summary is not None else round(selected_line2_y / gray.shape[0], 3),
+            "selected_bottom_ratio": round(selected_split_summary["split_info"]["bottom_ratio"], 3)
+            if selected_split_summary is not None else round((gray.shape[0] - selected_line2_y) / gray.shape[0], 3),
+            "selected_split_score": round(selected_split_summary["split_score"], 2)
+            if selected_split_summary is not None else None,
+            "selected_line1_label": selected_line1_split,
+            "selected_line1_split_y": selected_line1_y,
+            "selected_line2_label": selected_line2_split,
+            "selected_line2_split_y": selected_line2_y,
         },
         "candidate_stats": {
-            "line1_candidates": best_split_bundle["line1_candidate_count"],
-            "line2_candidates": best_split_bundle["line2_candidate_count"],
+            "line1_candidates": len(line1_ranked),
+            "line2_candidates": len(line2_ranked),
             "pairs_evaluated": pair_count,
             "line1_top": [
                 {
@@ -1486,6 +1901,7 @@ def run_ocr(mrz_img):
                     "checksum_pass_count": c["checksum_pass_count"],
                     "support_count": c.get("support_count", 1),
                     "support_bonus": round(c.get("support_bonus", 0.0), 2),
+                    "split_label": c.get("split_label"),
                 }
                 for c in line1_top
             ],
@@ -1496,6 +1912,7 @@ def run_ocr(mrz_img):
                     "variant_id": c["variant_id"],
                     "psm": c["psm"],
                     "checksum_pass_count": c["checksum_pass_count"],
+                    "split_label": c.get("split_label"),
                 }
                 for c in line2_top
             ],
@@ -1510,6 +1927,7 @@ def run_ocr(mrz_img):
                 "text": best_line1,
                 "variant_id": best_pair["line1"]["variant_id"],
                 "psm": best_pair["line1"]["psm"],
+                "split_label": selected_line1_split,
                 "variant_meta": best_pair["line1"]["variant_meta"],
                 "support_count": best_pair["line1"].get("support_count", 1),
                 "support_bonus": round(best_pair["line1"].get("support_bonus", 0.0), 2),
@@ -1519,6 +1937,7 @@ def run_ocr(mrz_img):
                 "text": best_line2,
                 "variant_id": best_pair["line2"]["variant_id"],
                 "psm": best_pair["line2"]["psm"],
+                "split_label": selected_line2_split,
                 "variant_meta": best_pair["line2"]["variant_meta"],
             },
             "pair_score": round(best_pair["pair_score"], 2),
