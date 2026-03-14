@@ -260,6 +260,37 @@ Preferred evaluation mindset:
 
 ---
 
+## Recent performance findings
+
+The project now has enough timing instrumentation that performance work should be evidence-driven.
+
+Observed findings from recent Paddle investigation:
+- For single-file TD3 runs, the dominant cost is **Stage 3 candidate OCR**, not Stage 1 or Stage 2.
+- `document_preparation`, MRZ detection, variant-preparation, and final ranking are all comparatively small.
+- The main wall-clock cost sits in `mrz.ocr.timing_ms.candidate_ocr_ms`.
+- Paddle GPU is available and resolves to `gpu:0`, but utilization is bursty because the runtime is doing multiple small batched inference calls rather than one dense sustained job.
+- Current Paddle telemetry shows batching is working. Typical balanced-profile files use multiple batched `predict()` calls and do not fall back to serial.
+- Reducing image-save/debug I/O in normal mode did **not** materially change runtime.
+- CPU-side preprocessing parallelism helped only marginally; it is not the main remaining bottleneck.
+
+Current proven-safe speed baseline:
+- `PADDLE_PROFILE=balanced`
+- `PADDLE_FAST=False`
+- `MRZ_VARIANT_WORKERS=4`
+
+What was learned from experiments:
+- A very aggressive Paddle fast profile reduced runtime but caused benchmark regressions and should not be the default without explicit tradeoff acceptance.
+- Pruning line-1 split evaluation based only on line-2 split quality caused a real regression (`inam_new.png`) and should be treated as unsafe unless redesigned more carefully.
+- Narrow line-1 scoring penalties for obvious garbage tails can be safe when backed by report evidence and targeted tests.
+
+Guidance for future speed work:
+- For single-file latency, the main lever is reducing **redundant OCR candidate evaluation** without losing the candidate that carries the correct line 1.
+- Prefer conservative, report-backed changes over broad search-space cuts.
+- When a new optimization changes candidate flow, rerun the full Paddle reference set and inspect failed sample reports before keeping it.
+- Always inspect `mrz.ocr.backend_stats.paddle` and timing fields in the report before drawing conclusions about GPU behavior.
+
+---
+
 ## Output expectations for repository work
 
 Depending on task, respond in one of these modes:
