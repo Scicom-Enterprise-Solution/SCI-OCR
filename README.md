@@ -1,10 +1,14 @@
-# Passport MRZ OCR Pipeline
+# OCR Pipeline Foundation
 
-This project extracts Machine Readable Zone (MRZ) text from a passport PDF in 3 stages:
+This repository is evolving toward a general-purpose OCR pipeline for document processing.
+
+The current production-ready workflow is passport MRZ extraction in 3 stages:
 
 1. Preprocess passport page (render + perspective correction)
 2. Detect and crop MRZ region
 3. OCR and normalize MRZ text
+
+The codebase is now split so the OCR engines, document input loaders, and task-specific pipeline logic can grow separately. That keeps the current CLI and local-file regression workflow intact while preparing the core for future API-driven usage.
 
 ## Requirements
 
@@ -62,6 +66,20 @@ OCR_BACKEND=auto python run_pipeline.py samples/sadia.png
 ```
 
 Use `FAST_OCR=true` only for quick smoke tests. For production MRZ extraction, keep the exhaustive profile enabled.
+
+## Architecture
+
+The project is organized so reusable OCR infrastructure stays separate from MRZ-specific logic.
+
+- `document_inputs/` - image and PDF loading/decoding
+- `ocr_backends/` - OCR engine integrations such as PaddleOCR and Tesseract
+- `pipelines/` - task orchestration layers
+- `detect_mrz.py` - MRZ region detection
+- `ocr_mrz.py` - MRZ-specific OCR candidate scoring, repair, and normalization
+- `report_utils.py` - report writing and MRZ parsing helpers
+- `run_pipeline.py` - CLI wrapper for local-file execution
+
+The current end-to-end pipeline is MRZ-focused, but the surrounding structure is being shaped for broader document OCR workflows.
 
 ## PaddleOCR Backend
 
@@ -179,10 +197,13 @@ python scripts/check_reference_set_tesseract.py
 
 ## Main Files
 
-- `run_pipeline.py` - Runs all stages end-to-end
-- `preprocess_passport.py` - PDF render, contour detection, perspective correction
+- `run_pipeline.py` - CLI entrypoint for local-file testing
+- `pipelines/mrz_pipeline.py` - reusable MRZ service pipeline
+- `document_inputs/` - document file loaders for images and PDFs
+- `ocr_backends/` - OCR backend integrations
+- `preprocess_passport.py` - contour detection and perspective correction
 - `detect_mrz.py` - MRZ band detection and crop
-- `ocr_mrz.py` - MRZ OCR and normalization
+- `ocr_mrz.py` - MRZ-specific OCR scoring and normalization
 - `requirements.txt` - Python dependencies
 
 ## Notes

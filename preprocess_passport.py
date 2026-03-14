@@ -5,10 +5,10 @@ PDF → Render Image → Detect Document Contour → Perspective Correction
 
 import os
 import sys
-import fitz  # PyMuPDF
 import cv2
 import numpy as np
 from env_utils import load_env_file
+from document_inputs.pdf_input import render_pdf_page
 
 
 load_env_file()
@@ -51,42 +51,6 @@ APPROX_EPSILON_FACTORS = (0.02, 0.03, 0.04, 0.05, 0.08)
 # Covers both landscape and portrait captures with perspective skew.
 MIN_DOC_ASPECT_RATIO = 0.45
 MAX_DOC_ASPECT_RATIO = 2.40
-
-
-# ---------------------------------------------------------------------------
-# Step 1 — Render PDF page to numpy image
-# ---------------------------------------------------------------------------
-
-def render_pdf_page(pdf_path: str, dpi: int = DPI) -> np.ndarray:
-    """
-    Open the PDF and render the first page at the given DPI.
-    Returns a BGR numpy array (OpenCV convention).
-    """
-    if not os.path.isfile(pdf_path):
-        print(f"[ERROR] PDF not found: {pdf_path}")
-        sys.exit(1)
-
-    doc = fitz.open(pdf_path)
-    page = doc[0]  # first page only
-
-    # Build a transformation matrix that scales to the target DPI.
-    # PyMuPDF's default resolution is 72 DPI, so scale = dpi / 72.
-    scale = dpi / 72.0
-    matrix = fitz.Matrix(scale, scale)
-
-    # Render to a Pixmap (RGBA by default when alpha=True)
-    pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-    doc.close()
-
-    # Convert raw bytes -> numpy array -> RGB -> BGR (OpenCV)
-    img_rgb = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
-        pixmap.height, pixmap.width, 3
-    )
-    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-
-    print(f"[Step 1] Rendered '{pdf_path}' at {dpi} DPI -> "
-          f"{img_bgr.shape[1]}x{img_bgr.shape[0]} px (W x H)")
-    return img_bgr
 
 
 # ---------------------------------------------------------------------------
