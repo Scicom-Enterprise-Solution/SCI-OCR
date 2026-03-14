@@ -74,8 +74,8 @@ The project is organized so reusable OCR infrastructure stays separate from MRZ-
 - `document_inputs/` - image and PDF loading/decoding
 - `ocr_backends/` - OCR engine integrations such as PaddleOCR and Tesseract
 - `pipelines/` - task orchestration layers
-- `detect_mrz.py` - MRZ region detection
-- `ocr_mrz.py` - MRZ-specific OCR candidate scoring, repair, and normalization
+- `mrz/` - MRZ-specific detection, normalization, checksums, repair, scoring, and OCR helpers
+- `mrz/ocr_pipeline.py` - MRZ-specific OCR candidate scoring, repair, and normalization
 - `report_utils.py` - report writing and MRZ parsing helpers
 - `run_pipeline.py` - CLI wrapper for local-file execution
 
@@ -201,9 +201,9 @@ python scripts/check_reference_set_tesseract.py
 - `pipelines/mrz_pipeline.py` - reusable MRZ service pipeline
 - `document_inputs/` - document file loaders for images and PDFs
 - `ocr_backends/` - OCR backend integrations
-- `preprocess_passport.py` - contour detection and perspective correction
-- `detect_mrz.py` - MRZ band detection and crop
-- `ocr_mrz.py` - MRZ-specific OCR scoring and normalization
+- `document_preparation/passport.py` - contour detection and perspective correction
+- `mrz/detect.py` - MRZ band detection and crop
+- `mrz/ocr_pipeline.py` - MRZ-specific OCR scoring and normalization
 - `requirements.txt` - Python dependencies
 
 ## Notes

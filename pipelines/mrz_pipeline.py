@@ -5,12 +5,12 @@ import cv2
 
 from document_inputs import DocumentInputError, SUPPORTED_IMAGE_EXTS, load_document_input
 from face_detection import orient_with_face_hint, extract_face_crop, draw_face_box
-from mrz_rotation import detect_mrz_with_rotation_fallback
+from mrz.rotation import detect_mrz_with_rotation_fallback
 from report_utils import parse_mrz_td3, write_pipeline_report
 
-import detect_mrz as stage2
-import ocr_mrz as stage3
-import preprocess_passport as stage1
+from document_preparation import passport as stage1
+from mrz import detect as stage2
+from mrz import ocr_pipeline as stage3
 
 
 def _make_logger(enabled: bool):

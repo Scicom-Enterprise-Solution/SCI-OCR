@@ -20,7 +20,7 @@ USE_FACE_HINT = os.getenv("USE_FACE_HINT", "True").strip().lower() in (
 # ---------------------------------------------------------------------------
 
 from pipelines.mrz_pipeline import build_stage2_attempts, process_document
-import preprocess_passport as stage1
+from document_preparation import passport as stage1
 
 
 def main() -> None:

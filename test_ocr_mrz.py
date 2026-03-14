@@ -5,9 +5,10 @@ import unittest
 import numpy as np
 from unittest import mock
 
-from ocr_mrz import (
+from mrz.ocr_pipeline import (
     _apply_candidate_support_bonus,
     _best_paddle_text_candidate,
+    _line1_selection_penalty,
     _paddle_ocr_image,
     _pair_selection_key,
     _prepare_variants,
@@ -240,6 +241,21 @@ class TestPairSelection(unittest.TestCase):
 
         self.assertGreater(_pair_selection_key(better_pair), _pair_selection_key(worse_pair))
 
+    def test_paddle_spill_penalty_demotes_spill_trimmed_line1_candidates(self) -> None:
+        paddle_candidate = {
+            "backend": "paddle",
+            "spill_trimmed": True,
+            "repairs": [{"reason": "name_noise_collapse"}],
+        }
+        tesseract_candidate = {
+            "backend": "tesseract",
+            "spill_trimmed": True,
+            "repairs": [{"reason": "name_noise_collapse"}],
+        }
+
+        self.assertGreater(_line1_selection_penalty(paddle_candidate), 0.0)
+        self.assertEqual(_line1_selection_penalty(tesseract_candidate), 0.0)
+
 
 class TestOcrSearchProfiles(unittest.TestCase):
     def test_fast_profile_limits_variant_generation(self) -> None:
@@ -298,17 +314,16 @@ class TestOcrBackendSelection(unittest.TestCase):
         previous = os.environ.get("OCR_BACKEND")
         os.environ["OCR_BACKEND"] = "tesseract"
         try:
-            import ocr_mrz
-
-            importlib.reload(ocr_mrz)
-            self.assertEqual(ocr_mrz._resolve_ocr_backends(), ["tesseract"])
+            from mrz import ocr_pipeline
+            importlib.reload(ocr_pipeline)
+            self.assertEqual(ocr_pipeline._resolve_ocr_backends(), ["tesseract"])
         finally:
             if previous is None:
                 os.environ.pop("OCR_BACKEND", None)
             else:
                 os.environ["OCR_BACKEND"] = previous
-            import ocr_mrz
-            importlib.reload(ocr_mrz)
+            from mrz import ocr_pipeline
+            importlib.reload(ocr_pipeline)
 
 class TestPaddleOcrAdapter(unittest.TestCase):
     def test_resolve_paddle_use_gpu_returns_true_when_cuda_device_is_visible(self) -> None:
@@ -316,7 +331,7 @@ class TestPaddleOcrAdapter(unittest.TestCase):
         fake_paddle.device.is_compiled_with_cuda.return_value = True
         fake_paddle.device.cuda.device_count.return_value = 1
 
-        with mock.patch("ocr_mrz.PADDLEOCR_USE_GPU", True):
+        with mock.patch("mrz.ocr_pipeline.PADDLEOCR_USE_GPU", True):
             with mock.patch.dict(sys.modules, {"paddle": fake_paddle}):
                 self.assertTrue(_resolve_paddle_use_gpu())
 
@@ -328,7 +343,7 @@ class TestPaddleOcrAdapter(unittest.TestCase):
                 seen["shape"] = img.shape
                 return [{"rec_texts": ["P<PAKWAQAR<<SADIA"]}]
 
-        with mock.patch("ocr_mrz._get_paddle_ocr", return_value=FakePaddleOCR()):
+        with mock.patch("mrz.ocr_pipeline._get_paddle_ocr", return_value=FakePaddleOCR()):
             text = _paddle_ocr_image(np.full((12, 24), 255, dtype=np.uint8))
 
         self.assertEqual(seen["shape"], (12, 24, 3))
