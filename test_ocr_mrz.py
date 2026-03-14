@@ -30,7 +30,7 @@ from mrz.td3.ocr_pipeline import (
     validate_and_correct_mrz,
     validate_td3_checks,
 )
-from ocr_backends.paddle_backend import paddle_ocr_images
+from ocr_backends.paddle_backend import get_paddle_ocr_stats, paddle_ocr_images, reset_paddle_ocr_stats
 
 
 class TestLine1Repair(unittest.TestCase):
@@ -200,6 +200,12 @@ class TestLine1Repair(unittest.TestCase):
         trimmed = score_td3_line1("P<MLIDIALLO<<FATOUMA<<<<<<<<<<<<<<<<<<<<<<<<")
 
         self.assertGreater(full, trimmed)
+
+    def test_score_penalizes_short_garbage_tail_fragments_after_valid_given_name(self) -> None:
+        clean = score_td3_line1("P<BGDALAM<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<")
+        noisy = score_td3_line1("P<BGDALAM<<SHAHADAT<<<<CCC<<<CCCCC<KCAK<<<<<")
+
+        self.assertGreater(clean, noisy)
 
     def test_accepts_uto_mrz_country_code(self) -> None:
         self.assertTrue(is_valid_mrz_country_code("UTO"))
@@ -406,6 +412,11 @@ class TestOcrSearchProfiles(unittest.TestCase):
             self.assertEqual(search_space["split_count"], 3)
             self.assertEqual(search_space["per_line_variants"], 4)
             self.assertEqual(search_space["total_tesseract_calls"], 72)
+        elif search_space.get("profile_name") == "balanced":
+            self.assertEqual(search_space["psms"], [7, 6, 13])
+            self.assertEqual(search_space["split_count"], 4)
+            self.assertEqual(search_space["per_line_variants"], 12)
+            self.assertEqual(search_space["total_tesseract_calls"], 288)
         else:
             self.assertEqual(search_space["psms"], [7, 6, 13])
             self.assertEqual(search_space["split_count"], 6)
@@ -455,6 +466,7 @@ class TestPaddleOcrAdapter(unittest.TestCase):
 
     def test_paddle_ocr_images_uses_batch_predict_when_available(self) -> None:
         seen = {}
+        reset_paddle_ocr_stats()
 
         class FakePaddleOCR:
             def predict(self, imgs):
@@ -490,6 +502,12 @@ class TestPaddleOcrAdapter(unittest.TestCase):
                 normalize_td3_line1("P<BGDAHAMED<<INAM"),
             ],
         )
+        stats = get_paddle_ocr_stats()
+        self.assertEqual(stats["batch_requests"], 1)
+        self.assertEqual(stats["batched_calls"], 1)
+        self.assertEqual(stats["batch_fallbacks"], 0)
+        self.assertEqual(stats["serial_calls"], 0)
+        self.assertEqual(stats["images_submitted"], 2)
 
     def test_trim_line1_spill_removes_line2_prefix_leak(self) -> None:
         repaired = _trim_line1_spill(

@@ -9,6 +9,32 @@ import numpy as np
 
 
 _PADDLE_OCR_INSTANCE = None
+_PADDLE_OCR_STATS = {}
+
+
+def reset_paddle_ocr_stats() -> None:
+    global _PADDLE_OCR_STATS
+    _PADDLE_OCR_STATS = {
+        "inference_calls": 0,
+        "batch_requests": 0,
+        "batched_calls": 0,
+        "batch_fallbacks": 0,
+        "serial_calls": 0,
+        "images_submitted": 0,
+        "batch_sizes": [],
+        "predict_calls": 0,
+        "ocr_calls": 0,
+    }
+
+
+def get_paddle_ocr_stats() -> dict:
+    return {
+        **_PADDLE_OCR_STATS,
+        "batch_sizes": list(_PADDLE_OCR_STATS.get("batch_sizes", [])),
+    }
+
+
+reset_paddle_ocr_stats()
 
 
 def resolve_paddle_cache_home() -> str:
@@ -170,9 +196,21 @@ def _prepare_paddle_image(img):
 
 
 def _run_paddle_inference(ocr, paddle_input):
+    is_batch = isinstance(paddle_input, list)
+    batch_size = len(paddle_input) if is_batch else 1
+    _PADDLE_OCR_STATS["inference_calls"] += 1
+    _PADDLE_OCR_STATS["images_submitted"] += batch_size
+    if is_batch:
+        _PADDLE_OCR_STATS["batch_requests"] += 1
+        _PADDLE_OCR_STATS["batch_sizes"].append(batch_size)
+    else:
+        _PADDLE_OCR_STATS["serial_calls"] += 1
+
     if hasattr(ocr, "predict"):
+        _PADDLE_OCR_STATS["predict_calls"] += 1
         return ocr.predict(paddle_input)
     if hasattr(ocr, "ocr"):
+        _PADDLE_OCR_STATS["ocr_calls"] += 1
         return ocr.ocr(paddle_input, cls=False)
     raise RuntimeError("Unsupported PaddleOCR instance: missing predict/ocr method")
 
@@ -316,6 +354,7 @@ def paddle_ocr_images(
             batch_results = None
 
     if batch_results is None:
+        _PADDLE_OCR_STATS["batch_fallbacks"] += 1
         texts = []
         for paddle_img in paddle_imgs:
             try:
@@ -339,6 +378,7 @@ def paddle_ocr_images(
             )
         return texts
 
+    _PADDLE_OCR_STATS["batched_calls"] += 1
     return [
         _extract_text_from_paddle_result(
             result,

@@ -167,6 +167,18 @@ def score_td3_line1(text: str) -> float:
             if 2 <= len(tail_token) <= 12:
                 score += 4
 
+        short_tail_tokens = [token for token in tail_tokens if 1 <= len(token) <= 5]
+        if len(short_tail_tokens) >= 2 and filler_tail.count("<") >= 8:
+            score -= len(short_tail_tokens) * 10.0
+
+        suspicious_tail_fragments = sum(
+            1
+            for token in short_tail_tokens
+            if len(set(token)) <= 3 or _name_token_score(token) <= 0
+        )
+        if suspicious_tail_fragments >= 2:
+            score -= suspicious_tail_fragments * 12.0
+
         tail_letters = sum(1 for c in tail_remainder if "A" <= c <= "Z")
         tail_fillers = filler_tail.count("<")
         score -= tail_letters * 2.5

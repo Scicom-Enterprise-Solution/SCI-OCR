@@ -13,6 +13,10 @@ PADDLE_FAST_VARIANT_SOURCES = ("gray", "clahe")
 PADDLE_FAST_VARIANT_SCALES = (2,)
 PADDLE_FAST_VARIANT_THRESHOLDS = ("otsu", "adaptive")
 PADDLE_FAST_SPLIT_LABELS = ("projection", "half", "projection_p4")
+PADDLE_BALANCED_VARIANT_SOURCES = ("gray", "clahe")
+PADDLE_BALANCED_VARIANT_SCALES = (2, 3)
+PADDLE_BALANCED_VARIANT_THRESHOLDS = ("otsu", "adaptive", "otsu_thick")
+PADDLE_BALANCED_SPLIT_LABELS = ("projection", "half", "projection_m4", "projection_p4")
 
 
 def clean_mrz_image(mrz_img):
@@ -80,7 +84,13 @@ def _cap_width(img, max_width: int):
     return cv2.resize(img, (max_width, target_height), interpolation=cv2.INTER_AREA)
 
 
-def ocr_search_profile(fast_ocr: bool, *, paddle_fast: bool = False, ocr_backend: str = "") -> dict:
+def ocr_search_profile(
+    fast_ocr: bool,
+    *,
+    paddle_fast: bool = False,
+    paddle_profile: str = "exhaustive",
+    ocr_backend: str = "",
+) -> dict:
     if paddle_fast and ocr_backend == "paddle":
         return {
             "variant_sources": PADDLE_FAST_VARIANT_SOURCES,
@@ -88,6 +98,15 @@ def ocr_search_profile(fast_ocr: bool, *, paddle_fast: bool = False, ocr_backend
             "variant_thresholds": PADDLE_FAST_VARIANT_THRESHOLDS,
             "split_labels": PADDLE_FAST_SPLIT_LABELS,
             "profile_name": "paddle_fast",
+        }
+
+    if ocr_backend == "paddle" and paddle_profile == "balanced":
+        return {
+            "variant_sources": PADDLE_BALANCED_VARIANT_SOURCES,
+            "variant_scales": PADDLE_BALANCED_VARIANT_SCALES,
+            "variant_thresholds": PADDLE_BALANCED_VARIANT_THRESHOLDS,
+            "split_labels": PADDLE_BALANCED_SPLIT_LABELS,
+            "profile_name": "balanced",
         }
 
     if fast_ocr:
@@ -292,9 +311,15 @@ def estimate_ocr_search_space(
     tesseract_psms: list[int],
     tesseract_oems: list[int],
     paddle_fast: bool = False,
+    paddle_profile: str = "exhaustive",
     ocr_backend: str = "",
 ) -> dict:
-    profile = ocr_search_profile(fast_ocr, paddle_fast=paddle_fast, ocr_backend=ocr_backend)
+    profile = ocr_search_profile(
+        fast_ocr,
+        paddle_fast=paddle_fast,
+        paddle_profile=paddle_profile,
+        ocr_backend=ocr_backend,
+    )
     per_line_variants = (
         len(profile["variant_sources"])
         * len(profile["variant_scales"])
@@ -306,6 +331,7 @@ def estimate_ocr_search_space(
     return {
         "fast_ocr": fast_ocr,
         "paddle_fast": bool(paddle_fast and ocr_backend == "paddle"),
+        "paddle_profile": paddle_profile if ocr_backend == "paddle" else None,
         "profile_name": profile.get("profile_name", "unknown"),
         "psms": list(tesseract_psms),
         "oems": list(tesseract_oems),

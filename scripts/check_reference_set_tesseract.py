@@ -13,6 +13,14 @@ if str(ROOT) not in sys.path:
 
 from samples.reference_utils import normalize_reference_samples
 
+GREEN = "\033[32m"
+RED = "\033[31m"
+RESET = "\033[0m"
+
+
+def color_status(label: str, ok: bool) -> str:
+    return f"{GREEN if ok else RED}{label}{RESET}"
+
 
 def print_sample_result(
     filename: str,
@@ -27,19 +35,23 @@ def print_sample_result(
     returncode: int | None = None,
 ) -> None:
     suffix = f" ({elapsed_s:.2f}s)" if elapsed_s is not None else ""
-    print(f"RESULT {filename} {'PASS' if ok else 'FAIL'}{suffix}")
+    print(f"RESULT {filename} {color_status('PASS' if ok else 'FAIL', ok)}{suffix}")
     if actual1 or actual2:
         print("Extracted MRZ text:")
         print(actual1)
         print(actual2)
     if ok:
-        print("[Reference] PASS (line1=PASS, line2=PASS)")
+        print(
+            f"[Reference] {color_status('PASS', True)} "
+            f"(line1={color_status('PASS', True)}, line2={color_status('PASS', True)})"
+        )
     else:
         line1_ok = actual1 == expected1
         line2_ok = actual2 == expected2
         print(
-            f"[Reference] FAIL (line1={'PASS' if line1_ok else 'FAIL'}, "
-            f"line2={'PASS' if line2_ok else 'FAIL'})"
+            f"[Reference] {color_status('FAIL', False)} "
+            f"(line1={color_status('PASS' if line1_ok else 'FAIL', line1_ok)}, "
+            f"line2={color_status('PASS' if line2_ok else 'FAIL', line2_ok)})"
         )
         if not line1_ok and expected1:
             print(f"[Reference] Expected line1: {expected1}")
@@ -143,8 +155,8 @@ def main() -> int:
             })
 
     print()
-    print(f"PASS {len(passes)}")
-    print(f"FAIL {len(fails)}")
+    print(f"{color_status('PASS', True)} {len(passes)}")
+    print(f"{color_status('FAIL', False)} {len(fails)}")
 
     for name in passes:
         print(f"OK {name}")

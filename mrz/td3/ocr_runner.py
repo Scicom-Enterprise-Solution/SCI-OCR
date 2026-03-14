@@ -6,8 +6,10 @@ import numpy as np
 from ocr_backends.paddle_backend import (
     best_paddle_text_candidate as paddle_backend_best_text_candidate,
     extract_paddle_lines as paddle_backend_extract_lines,
+    get_paddle_ocr_stats as paddle_backend_get_ocr_stats,
     get_paddle_ocr as paddle_backend_get_ocr,
     paddle_ocr_images as paddle_backend_ocr_images,
+    reset_paddle_ocr_stats as paddle_backend_reset_ocr_stats,
     resolve_paddle_use_gpu as paddle_backend_resolve_use_gpu,
     trim_line1_spill as paddle_backend_trim_line1_spill,
 )
@@ -50,6 +52,14 @@ def resolve_paddle_use_gpu(use_gpu: bool) -> bool:
 
 def get_paddle_ocr(lang: str, use_gpu: bool):
     return paddle_backend_get_ocr(lang, use_gpu)
+
+
+def reset_paddle_ocr_stats() -> None:
+    paddle_backend_reset_ocr_stats()
+
+
+def get_paddle_ocr_stats() -> dict:
+    return paddle_backend_get_ocr_stats()
 
 
 def best_paddle_text_candidate(

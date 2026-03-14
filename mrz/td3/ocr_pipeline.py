@@ -39,11 +39,13 @@ from mrz.td3.ocr_runner import (
     PADDLE_OCR_BACKEND_LABEL,
     apply_candidate_support_bonus as _apply_candidate_support_bonus,
     best_paddle_text_candidate as _best_paddle_text_candidate_impl,
+    get_paddle_ocr_stats as _get_paddle_ocr_stats_impl,
     generate_ocr_candidates as generate_ocr_candidates_impl,
     get_paddle_ocr as _get_paddle_ocr_impl,
     line1_selection_penalty as _line1_selection_penalty,
     ocr_image as _ocr_image_impl,
     paddle_ocr_image as _paddle_ocr_image_impl,
+    reset_paddle_ocr_stats as _reset_paddle_ocr_stats_impl,
     resolve_ocr_backends as _resolve_ocr_backends_impl,
     resolve_paddle_use_gpu as _resolve_paddle_use_gpu_impl,
     trim_line1_spill as _trim_line1_spill_impl,
@@ -147,6 +149,16 @@ def _parse_positive_int_env(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _parse_choice_env(name: str, default: str, allowed: set[str]) -> str:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in allowed:
+        return raw
+    print(f"[WARN] Ignoring invalid value in {name}: {raw}")
+    return default
+
+
 PADDLEOCR_USE_GPU = _parse_bool_env("PADDLEOCR_USE_GPU", False)
 
 
@@ -175,6 +187,7 @@ def _resolve_oems(lang: str) -> list[int]:
 
 FAST_OCR = _parse_bool_env("FAST_OCR", False)
 PADDLE_FAST = _parse_bool_env("PADDLE_FAST", True)
+PADDLE_PROFILE = _parse_choice_env("PADDLE_PROFILE", "exhaustive", {"exhaustive", "balanced", "fast"})
 MRZ_VARIANT_WORKERS = _parse_positive_int_env("MRZ_VARIANT_WORKERS", min(4, os.cpu_count() or 1))
 TESSERACT_PSMS = _parse_int_list_env(
     "TESSERACT_PSMS",
@@ -215,7 +228,12 @@ def save(img, filename):
 # -------------------------------------------------------
 
 def _ocr_search_profile() -> dict:
-    return ocr_search_profile(FAST_OCR, paddle_fast=PADDLE_FAST, ocr_backend=OCR_BACKEND)
+    return ocr_search_profile(
+        FAST_OCR,
+        paddle_fast=(PADDLE_FAST or PADDLE_PROFILE == "fast"),
+        paddle_profile=PADDLE_PROFILE,
+        ocr_backend=OCR_BACKEND,
+    )
 
 
 def _prepare_variants(gray, prefix: str, profile: dict | None = None):
@@ -249,7 +267,8 @@ def estimate_ocr_search_space() -> dict:
         fast_ocr=FAST_OCR,
         tesseract_psms=TESSERACT_PSMS,
         tesseract_oems=TESSERACT_OEMS,
-        paddle_fast=PADDLE_FAST,
+        paddle_fast=(PADDLE_FAST or PADDLE_PROFILE == "fast"),
+        paddle_profile=PADDLE_PROFILE,
         ocr_backend=OCR_BACKEND,
     )
 
@@ -302,6 +321,14 @@ def _resolve_paddle_use_gpu() -> bool:
 
 def _get_paddle_ocr():
     return _get_paddle_ocr_impl(PADDLEOCR_LANG, PADDLEOCR_USE_GPU)
+
+
+def _reset_paddle_ocr_stats() -> None:
+    _reset_paddle_ocr_stats_impl()
+
+
+def _get_paddle_ocr_stats() -> dict:
+    return _get_paddle_ocr_stats_impl()
 
 
 def _best_paddle_text_candidate(texts: list[str], line_kind: str) -> str:
@@ -460,6 +487,7 @@ def _pair_selection_key(candidate_pair: dict) -> tuple:
 
 def run_ocr(mrz_img):
     ocr_started_at = time.perf_counter()
+    _reset_paddle_ocr_stats()
     if isinstance(mrz_img, str):
         img = cv2.imread(mrz_img, cv2.IMREAD_COLOR)
     else:
@@ -527,7 +555,6 @@ def run_ocr(mrz_img):
         split_info = prepared["split_info"]
         line1_img = prepared["line1_img"]
         line2_img = prepared["line2_img"]
-
         line1_candidates = generate_ocr_candidates_impl(
             line1_img,
             f"line1_{split_info['label']}",
@@ -781,6 +808,10 @@ def run_ocr(mrz_img):
         "checksum_summary": checks,
         "repairs_applied": best_pair["repairs_applied"],
         "parsed_fields": parsed,
+        "backend_stats": {
+            "backend": OCR_BACKEND,
+            "paddle": _get_paddle_ocr_stats() if OCR_BACKEND in {"paddle", "auto", "hybrid", "both"} else None,
+        },
         "timing_ms": {
             "total_ocr_ms": round((time.perf_counter() - ocr_started_at) * 1000.0, 2),
             "candidate_generation_ms": candidate_generation_ms,
