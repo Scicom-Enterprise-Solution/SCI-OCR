@@ -30,6 +30,7 @@ from mrz.td3.ocr_pipeline import (
     validate_and_correct_mrz,
     validate_td3_checks,
 )
+from ocr_backends.paddle_backend import paddle_ocr_images
 
 
 class TestLine1Repair(unittest.TestCase):
@@ -451,6 +452,44 @@ class TestPaddleOcrAdapter(unittest.TestCase):
 
         self.assertEqual(seen["shape"], (12, 24, 3))
         self.assertEqual(text, "P<PAKWAQAR<<SADIA")
+
+    def test_paddle_ocr_images_uses_batch_predict_when_available(self) -> None:
+        seen = {}
+
+        class FakePaddleOCR:
+            def predict(self, imgs):
+                seen["count"] = len(imgs)
+                seen["shapes"] = [img.shape for img in imgs]
+                return [
+                    {"rec_texts": ["P<PAKWAQAR<<SADIA"]},
+                    {"rec_texts": ["P<BGDAHAMED<<INAM"]},
+                ]
+
+        with mock.patch("ocr_backends.paddle_backend.get_paddle_ocr", return_value=FakePaddleOCR()):
+            texts = paddle_ocr_images(
+                [
+                    np.full((12, 24), 255, dtype=np.uint8),
+                    np.full((10, 18), 255, dtype=np.uint8),
+                ],
+                line_kind="line1",
+                paddle_lang="en",
+                paddle_use_gpu=False,
+                normalize_mrz=normalize_td3_line1,
+                normalize_td3_line1=normalize_td3_line1,
+                normalize_td3_line2=lambda value: value,
+                score_td3_line1=score_td3_line1,
+                score_td3_line2=score_td3_line2,
+            )
+
+        self.assertEqual(seen["count"], 2)
+        self.assertEqual(seen["shapes"], [(12, 24, 3), (10, 18, 3)])
+        self.assertEqual(
+            texts,
+            [
+                normalize_td3_line1("P<PAKWAQAR<<SADIA"),
+                normalize_td3_line1("P<BGDAHAMED<<INAM"),
+            ],
+        )
 
     def test_trim_line1_spill_removes_line2_prefix_leak(self) -> None:
         repaired = _trim_line1_spill(

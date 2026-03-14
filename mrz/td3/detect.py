@@ -16,6 +16,7 @@ import sys
 import cv2
 import numpy as np
 from env_utils import load_env_file
+from logger_utils import is_debug_enabled
 
 
 load_env_file()
@@ -58,6 +59,7 @@ MRZ_LINE_COUNT = 2
 # Padding added around the final MRZ crop (pixels)
 CROP_PAD_X = 10
 CROP_PAD_Y = 15   # generous vertical padding to capture full character height
+ESSENTIAL_OUTPUTS = {"mrz_region.png", "mrz_detected.png"}
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +68,8 @@ CROP_PAD_Y = 15   # generous vertical padding to capture full character height
 
 def save(img: np.ndarray, filename: str) -> None:
     """Save an image to OUTPUT_DIR and print a confirmation."""
+    if not is_debug_enabled() and filename not in ESSENTIAL_OUTPUTS:
+        return
     path = os.path.join(OUTPUT_DIR, filename)
     cv2.imwrite(path, img)
     print(f"[Save]  {path}")

@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 from env_utils import load_env_file
 from document_inputs.pdf_input import render_pdf_page
+from logger_utils import is_debug_enabled
 
 
 load_env_file()
@@ -51,6 +52,7 @@ APPROX_EPSILON_FACTORS = (0.02, 0.03, 0.04, 0.05, 0.08)
 # Covers both landscape and portrait captures with perspective skew.
 MIN_DOC_ASPECT_RATIO = 0.45
 MAX_DOC_ASPECT_RATIO = 2.40
+ESSENTIAL_OUTPUTS = {"aligned_passport.png"}
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +298,8 @@ def perspective_correction(
 
 def save(img: np.ndarray, filename: str) -> None:
     """Save an image to the output directory and print a confirmation."""
+    if not is_debug_enabled() and filename not in ESSENTIAL_OUTPUTS:
+        return
     path = os.path.join(OUTPUT_DIR, filename)
     cv2.imwrite(path, img)
     print(f"[Save]  {path}")

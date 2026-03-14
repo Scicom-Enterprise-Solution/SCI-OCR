@@ -7,6 +7,7 @@ from ocr_backends.paddle_backend import (
     best_paddle_text_candidate as paddle_backend_best_text_candidate,
     extract_paddle_lines as paddle_backend_extract_lines,
     get_paddle_ocr as paddle_backend_get_ocr,
+    paddle_ocr_images as paddle_backend_ocr_images,
     resolve_paddle_use_gpu as paddle_backend_resolve_use_gpu,
     trim_line1_spill as paddle_backend_trim_line1_spill,
 )
@@ -129,6 +130,31 @@ def paddle_ocr_image(
     return normalize_mrz("".join(texts))
 
 
+def paddle_ocr_images(
+    images,
+    *,
+    line_kind: str | None,
+    paddle_lang: str,
+    paddle_use_gpu: bool,
+    normalize_mrz,
+    normalize_td3_line1,
+    normalize_td3_line2,
+    score_td3_line1,
+    score_td3_line2,
+):
+    return paddle_backend_ocr_images(
+        images,
+        line_kind=line_kind,
+        paddle_lang=paddle_lang,
+        paddle_use_gpu=paddle_use_gpu,
+        normalize_mrz=normalize_mrz,
+        normalize_td3_line1=normalize_td3_line1,
+        normalize_td3_line2=normalize_td3_line2,
+        score_td3_line1=score_td3_line1,
+        score_td3_line2=score_td3_line2,
+    )
+
+
 def generate_ocr_candidates(
     line_img,
     prefix: str,
@@ -146,11 +172,13 @@ def generate_ocr_candidates(
     normalize_td3_line2,
     score_td3_line1,
     score_td3_line2,
+    variants=None,
 ):
-    gray = to_gray(line_img)
     backends = resolve_ocr_backends(ocr_backend)
     line_kind = "line1" if prefix.startswith("line1_") else "line2" if prefix.startswith("line2_") else None
-    variants = prepare_variants(gray, prefix)
+    if variants is None:
+        gray = to_gray(line_img)
+        variants = prepare_variants(gray, prefix)
 
     candidates = []
     seen = set()
@@ -184,32 +212,35 @@ def generate_ocr_candidates(
                     "image": v["image"],
                 })
 
-        if "paddle" in backends:
-            text = paddle_ocr_image(
-                v["image"],
-                line_kind=line_kind,
-                paddle_lang=paddle_lang,
-                paddle_use_gpu=paddle_use_gpu,
-                normalize_mrz=normalize_mrz,
-                normalize_td3_line2=normalize_td3_line2,
-                score_td3_line1=score_td3_line1,
-                score_td3_line2=score_td3_line2,
-                trim_line1_spill_func=lambda value: trim_line1_spill(value, normalize_td3_line1),
-            )
-            if text:
-                norm = normalize_mrz(text)
-                key = ("paddle", norm, v["variant_id"], PADDLE_OCR_BACKEND_LABEL)
-                if key not in seen:
-                    seen.add(key)
-                    candidates.append({
-                        "backend": "paddle",
-                        "text_raw": text,
-                        "text": norm,
-                        "variant_id": v["variant_id"],
-                        "variant_meta": v["meta"],
-                        "psm": PADDLE_OCR_BACKEND_LABEL,
-                        "image": v["image"],
-                    })
+    if "paddle" in backends:
+        paddle_texts = paddle_ocr_images(
+            [v["image"] for v in variants],
+            line_kind=line_kind,
+            paddle_lang=paddle_lang,
+            paddle_use_gpu=paddle_use_gpu,
+            normalize_mrz=normalize_mrz,
+            normalize_td3_line1=normalize_td3_line1,
+            normalize_td3_line2=normalize_td3_line2,
+            score_td3_line1=score_td3_line1,
+            score_td3_line2=score_td3_line2,
+        )
+        for v, text in zip(variants, paddle_texts):
+            if not text:
+                continue
+            norm = normalize_mrz(text)
+            key = ("paddle", norm, v["variant_id"], PADDLE_OCR_BACKEND_LABEL)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append({
+                "backend": "paddle",
+                "text_raw": text,
+                "text": norm,
+                "variant_id": v["variant_id"],
+                "variant_meta": v["meta"],
+                "psm": PADDLE_OCR_BACKEND_LABEL,
+                "image": v["image"],
+            })
 
     return candidates
 

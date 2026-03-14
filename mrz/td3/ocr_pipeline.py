@@ -5,10 +5,12 @@ import sys
 import itertools
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
 
 from env_utils import load_env_file
+from logger_utils import is_debug_enabled
 from mrz.td3.country_codes import is_valid_mrz_country_code
 from mrz.td3.checksums import (
     AMBIGUOUS_FIELD_SUBS,
@@ -181,6 +183,13 @@ TESSERACT_PSMS = _parse_int_list_env(
 TESSERACT_OEMS = _resolve_oems(TESSERACT_LANG)
 
 OCR_CONFIGS = build_ocr_configs(TESSERACT_OEMS, TESSERACT_PSMS)
+ESSENTIAL_OUTPUTS = {
+    "mrz_clean.png",
+    "mrz_line1.png",
+    "mrz_line2.png",
+    "best_variant_line1.png",
+    "best_variant_line2.png",
+}
 
 
 # -------------------------------------------------------
@@ -188,6 +197,8 @@ OCR_CONFIGS = build_ocr_configs(TESSERACT_OEMS, TESSERACT_PSMS)
 # -------------------------------------------------------
 
 def save(img, filename):
+    if not is_debug_enabled() and filename not in ESSENTIAL_OUTPUTS:
+        return
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     path = os.path.join(OUTPUT_DIR, filename)
     cv2.imwrite(path, img)
@@ -360,6 +371,7 @@ def generate_ocr_candidates(line_img, prefix: str):
         normalize_td3_line2=normalize_td3_line2,
         score_td3_line1=score_td3_line1,
         score_td3_line2=score_td3_line2,
+        variants=None,
     )
 
 
@@ -487,13 +499,71 @@ def run_ocr(mrz_img):
     all_line2_candidates = []
     split_summaries = []
     candidate_generation_started_at = time.perf_counter()
+    variant_preparation_started_at = time.perf_counter()
 
-    for split_info in split_candidates:
+    def prepare_split_payload(split_info: dict) -> dict:
         split_y = split_info["split_y"]
         line1_img, line2_img = split_mrz_lines_at(gray, split_y)
+        return {
+            "split_info": split_info,
+            "line1_img": line1_img,
+            "line2_img": line2_img,
+            "line1_variants": _prepare_variants(line1_img, f"line1_{split_info['label']}"),
+            "line2_variants": _prepare_variants(line2_img, f"line2_{split_info['label']}"),
+        }
 
-        line1_candidates = generate_ocr_candidates(line1_img, f"line1_{split_info['label']}")
-        line2_candidates = generate_ocr_candidates(line2_img, f"line2_{split_info['label']}")
+    prepared_splits = []
+    if len(split_candidates) <= 1:
+        prepared_splits = [prepare_split_payload(split_candidates[0])] if split_candidates else []
+    else:
+        max_workers = min(MRZ_VARIANT_WORKERS, len(split_candidates), os.cpu_count() or 1)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            prepared_splits = list(executor.map(prepare_split_payload, split_candidates))
+
+    variant_preparation_ms = round((time.perf_counter() - variant_preparation_started_at) * 1000.0, 2)
+    ocr_candidate_eval_started_at = time.perf_counter()
+
+    for prepared in prepared_splits:
+        split_info = prepared["split_info"]
+        line1_img = prepared["line1_img"]
+        line2_img = prepared["line2_img"]
+
+        line1_candidates = generate_ocr_candidates_impl(
+            line1_img,
+            f"line1_{split_info['label']}",
+            to_gray=_to_gray,
+            prepare_variants=_prepare_variants,
+            ocr_backend=OCR_BACKEND,
+            ocr_configs=OCR_CONFIGS,
+            tesseract_lang=TESSERACT_LANG,
+            mrz_whitelist=MRZ_WHITELIST,
+            paddle_lang=PADDLEOCR_LANG,
+            paddle_use_gpu=PADDLEOCR_USE_GPU,
+            normalize_mrz=normalize_mrz,
+            normalize_td3_line1=normalize_td3_line1,
+            normalize_td3_line2=normalize_td3_line2,
+            score_td3_line1=score_td3_line1,
+            score_td3_line2=score_td3_line2,
+            variants=prepared["line1_variants"],
+        )
+        line2_candidates = generate_ocr_candidates_impl(
+            line2_img,
+            f"line2_{split_info['label']}",
+            to_gray=_to_gray,
+            prepare_variants=_prepare_variants,
+            ocr_backend=OCR_BACKEND,
+            ocr_configs=OCR_CONFIGS,
+            tesseract_lang=TESSERACT_LANG,
+            mrz_whitelist=MRZ_WHITELIST,
+            paddle_lang=PADDLEOCR_LANG,
+            paddle_use_gpu=PADDLEOCR_USE_GPU,
+            normalize_mrz=normalize_mrz,
+            normalize_td3_line1=normalize_td3_line1,
+            normalize_td3_line2=normalize_td3_line2,
+            score_td3_line1=score_td3_line1,
+            score_td3_line2=score_td3_line2,
+            variants=prepared["line2_variants"],
+        )
 
         for cand in line1_candidates:
             normalized_raw = normalize_td3_line1(cand["text"])
@@ -552,6 +622,7 @@ def run_ocr(mrz_img):
         if _should_early_accept_paddle_split(split_info, line1_ranked, line2_ranked):
             break
 
+    ocr_candidate_eval_ms = round((time.perf_counter() - ocr_candidate_eval_started_at) * 1000.0, 2)
     candidate_generation_ms = round((time.perf_counter() - candidate_generation_started_at) * 1000.0, 2)
 
     if not all_line1_candidates or not all_line2_candidates:
@@ -713,6 +784,8 @@ def run_ocr(mrz_img):
         "timing_ms": {
             "total_ocr_ms": round((time.perf_counter() - ocr_started_at) * 1000.0, 2),
             "candidate_generation_ms": candidate_generation_ms,
+            "variant_preparation_ms": variant_preparation_ms,
+            "candidate_ocr_ms": ocr_candidate_eval_ms,
             "ranking_and_pairing_ms": ranking_and_pairing_ms,
         },
     }

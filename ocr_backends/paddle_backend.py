@@ -162,6 +162,21 @@ def extract_paddle_lines(result, normalize_mrz) -> list[str]:
     return texts
 
 
+def _prepare_paddle_image(img):
+    paddle_img = img
+    if isinstance(paddle_img, np.ndarray) and paddle_img.ndim == 2:
+        paddle_img = cv2.cvtColor(paddle_img, cv2.COLOR_GRAY2BGR)
+    return paddle_img
+
+
+def _run_paddle_inference(ocr, paddle_input):
+    if hasattr(ocr, "predict"):
+        return ocr.predict(paddle_input)
+    if hasattr(ocr, "ocr"):
+        return ocr.ocr(paddle_input, cls=False)
+    raise RuntimeError("Unsupported PaddleOCR instance: missing predict/ocr method")
+
+
 def trim_line1_spill(text: str, normalize_td3_line1) -> str:
     text = normalize_td3_line1(text)
     text = re.sub(r"<{4,}[A-Z0-9]{1,6}$", lambda m: "<" * len(m.group(0)), text)
@@ -247,32 +262,107 @@ def paddle_ocr_image(
     score_td3_line2,
 ) -> str:
     ocr = get_paddle_ocr(paddle_lang, paddle_use_gpu)
-    paddle_img = img
+    paddle_img = _prepare_paddle_image(img)
 
-    if isinstance(paddle_img, np.ndarray) and paddle_img.ndim == 2:
-        paddle_img = cv2.cvtColor(paddle_img, cv2.COLOR_GRAY2BGR)
+    try:
+        result = _run_paddle_inference(ocr, paddle_img)
+    except NotImplementedError as exc:
+        raise RuntimeError(
+            "Installed Paddle runtime failed during CPU inference. "
+            "This project expects the official PaddleOCR-supported runtime; "
+            "reinstall the pinned versions from requirements-paddle.txt in .venv."
+        ) from exc
 
-    if hasattr(ocr, "predict"):
+    texts = extract_paddle_lines(result, normalize_mrz)
+    if not texts:
+        return ""
+
+    if line_kind in {"line1", "line2"}:
+        return best_paddle_text_candidate(
+            texts,
+            line_kind,
+            normalize_mrz=normalize_mrz,
+            normalize_td3_line2=normalize_td3_line2,
+            score_td3_line1=score_td3_line1,
+            score_td3_line2=score_td3_line2,
+            trim_line1_spill_func=lambda text: trim_line1_spill(text, normalize_td3_line1),
+        )
+
+    return normalize_mrz("".join(texts))
+
+
+def paddle_ocr_images(
+    images,
+    *,
+    line_kind: str | None,
+    paddle_lang: str,
+    paddle_use_gpu: bool,
+    normalize_mrz,
+    normalize_td3_line1,
+    normalize_td3_line2,
+    score_td3_line1,
+    score_td3_line2,
+):
+    ocr = get_paddle_ocr(paddle_lang, paddle_use_gpu)
+    paddle_imgs = [_prepare_paddle_image(img) for img in images]
+
+    batch_results = None
+    if paddle_imgs:
         try:
-            result = ocr.predict(paddle_img)
-        except NotImplementedError as exc:
-            raise RuntimeError(
-                "Installed Paddle runtime failed during CPU inference. "
-                "This project expects the official PaddleOCR-supported runtime; "
-                "reinstall the pinned versions from requirements-paddle.txt in .venv."
-            ) from exc
-    elif hasattr(ocr, "ocr"):
-        try:
-            result = ocr.ocr(paddle_img, cls=False)
-        except NotImplementedError as exc:
-            raise RuntimeError(
-                "Installed Paddle runtime failed during CPU inference. "
-                "This project expects the official PaddleOCR-supported runtime; "
-                "reinstall the pinned versions from requirements-paddle.txt in .venv."
-            ) from exc
-    else:
-        raise RuntimeError("Unsupported PaddleOCR instance: missing predict/ocr method")
+            candidate_results = _run_paddle_inference(ocr, paddle_imgs)
+            if isinstance(candidate_results, list) and len(candidate_results) == len(paddle_imgs):
+                batch_results = candidate_results
+        except Exception:
+            batch_results = None
 
+    if batch_results is None:
+        texts = []
+        for paddle_img in paddle_imgs:
+            try:
+                result = _run_paddle_inference(ocr, paddle_img)
+            except NotImplementedError as exc:
+                raise RuntimeError(
+                    "Installed Paddle runtime failed during CPU inference. "
+                    "This project expects the official PaddleOCR-supported runtime; "
+                    "reinstall the pinned versions from requirements-paddle.txt in .venv."
+                ) from exc
+            texts.append(
+                _extract_text_from_paddle_result(
+                    result,
+                    line_kind=line_kind,
+                    normalize_mrz=normalize_mrz,
+                    normalize_td3_line1=normalize_td3_line1,
+                    normalize_td3_line2=normalize_td3_line2,
+                    score_td3_line1=score_td3_line1,
+                    score_td3_line2=score_td3_line2,
+                )
+            )
+        return texts
+
+    return [
+        _extract_text_from_paddle_result(
+            result,
+            line_kind=line_kind,
+            normalize_mrz=normalize_mrz,
+            normalize_td3_line1=normalize_td3_line1,
+            normalize_td3_line2=normalize_td3_line2,
+            score_td3_line1=score_td3_line1,
+            score_td3_line2=score_td3_line2,
+        )
+        for result in batch_results
+    ]
+
+
+def _extract_text_from_paddle_result(
+    result,
+    *,
+    line_kind: str | None,
+    normalize_mrz,
+    normalize_td3_line1,
+    normalize_td3_line2,
+    score_td3_line1,
+    score_td3_line2,
+) -> str:
     texts = extract_paddle_lines(result, normalize_mrz)
     if not texts:
         return ""
