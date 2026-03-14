@@ -153,8 +153,7 @@ python -m unittest -q
 
 The `samples/` directory is tracked in git and contains the sample PDFs, PNGs, and MRZ reference data used for regression checks.
 
-- `samples/mrz_reference_samples.json` - corrected MRZ reference data keyed by legacy numeric `sample_id`
-- `samples/mrz_reference_samples_by_filename.json` - the same reference data keyed by filename (for example `sss.png`)
+- `samples/reference_clean.json` - filename-keyed MRZ reference data for the current clean reference set
 
 ## Output
 

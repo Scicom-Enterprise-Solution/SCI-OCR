@@ -62,7 +62,7 @@ def build_reference_comparison(input_path: str, line1: str, line2: str) -> dict:
     reference_path = os.path.join(
         os.path.dirname(__file__),
         "samples",
-        "mrz_reference_samples_by_filename.json",
+        "reference_clean.json",
     )
     filename = os.path.basename(input_path)
 

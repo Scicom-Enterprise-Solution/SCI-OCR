@@ -9,7 +9,7 @@ import sys
 
 def main() -> int:
     root = pathlib.Path(__file__).resolve().parents[1]
-    refs_path = root / "samples" / "mrz_reference_samples_by_filename.json"
+    refs_path = root / "samples" / "reference_clean.json"
 
     with refs_path.open("r", encoding="utf-8") as f:
         refs = json.load(f)
