@@ -3,6 +3,7 @@ import re
 import math
 import sys
 import itertools
+import time
 import warnings
 import cv2
 import numpy as np
@@ -130,6 +131,20 @@ def _parse_bool_env(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _parse_positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"[WARN] Ignoring invalid integer in {name}: {raw}")
+        return default
+
+    return value if value > 0 else default
+
+
 PADDLEOCR_USE_GPU = _parse_bool_env("PADDLEOCR_USE_GPU", False)
 
 
@@ -157,6 +172,8 @@ def _resolve_oems(lang: str) -> list[int]:
 
 
 FAST_OCR = _parse_bool_env("FAST_OCR", False)
+PADDLE_FAST = _parse_bool_env("PADDLE_FAST", True)
+MRZ_VARIANT_WORKERS = _parse_positive_int_env("MRZ_VARIANT_WORKERS", min(4, os.cpu_count() or 1))
 TESSERACT_PSMS = _parse_int_list_env(
     "TESSERACT_PSMS",
     [7] if FAST_OCR else [7, 6, 13],
@@ -187,11 +204,13 @@ def save(img, filename):
 # -------------------------------------------------------
 
 def _ocr_search_profile() -> dict:
-    return ocr_search_profile(FAST_OCR)
+    return ocr_search_profile(FAST_OCR, paddle_fast=PADDLE_FAST, ocr_backend=OCR_BACKEND)
 
 
 def _prepare_variants(gray, prefix: str, profile: dict | None = None):
-    return prepare_variants(gray, prefix, profile or _ocr_search_profile())
+    active_profile = dict(profile or _ocr_search_profile())
+    active_profile.setdefault("variant_workers", MRZ_VARIANT_WORKERS)
+    return prepare_variants(gray, prefix, active_profile)
 
 
 # -------------------------------------------------------
@@ -219,6 +238,28 @@ def estimate_ocr_search_space() -> dict:
         fast_ocr=FAST_OCR,
         tesseract_psms=TESSERACT_PSMS,
         tesseract_oems=TESSERACT_OEMS,
+        paddle_fast=PADDLE_FAST,
+        ocr_backend=OCR_BACKEND,
+    )
+
+
+def _should_early_accept_paddle_split(split_info: dict, line1_ranked: list[dict], line2_ranked: list[dict]) -> bool:
+    if OCR_BACKEND != "paddle" or not PADDLE_FAST:
+        return False
+    if split_info.get("label") != "projection":
+        return False
+    if not line1_ranked or not line2_ranked:
+        return False
+
+    best_line1 = line1_ranked[0]
+    best_line2 = line2_ranked[0]
+    checks = best_line2.get("checks", {})
+
+    return (
+        checks.get("passed_count", 0) == 5
+        and checks.get("composite_valid", False)
+        and best_line1.get("base_score", best_line1.get("score", 0.0)) >= 105.0
+        and best_line2.get("score", 0.0) >= 150.0
     )
 
 
@@ -406,6 +447,7 @@ def _pair_selection_key(candidate_pair: dict) -> tuple:
 
 
 def run_ocr(mrz_img):
+    ocr_started_at = time.perf_counter()
     if isinstance(mrz_img, str):
         img = cv2.imread(mrz_img, cv2.IMREAD_COLOR)
     else:
@@ -432,6 +474,8 @@ def run_ocr(mrz_img):
     print(
         "[OCR] Search profile: "
         f"fast={search_space['fast_ocr']} "
+        f"paddle_fast={search_space.get('paddle_fast', False)} "
+        f"profile={search_space.get('profile_name')} "
         f"psms={search_space['psms']} "
         f"splits={search_space['split_count']} "
         f"per_line_variants={search_space['per_line_variants']} "
@@ -442,6 +486,7 @@ def run_ocr(mrz_img):
     all_line1_candidates = []
     all_line2_candidates = []
     split_summaries = []
+    candidate_generation_started_at = time.perf_counter()
 
     for split_info in split_candidates:
         split_y = split_info["split_y"]
@@ -504,9 +549,15 @@ def run_ocr(mrz_img):
             "line2_img": line2_img,
         })
 
+        if _should_early_accept_paddle_split(split_info, line1_ranked, line2_ranked):
+            break
+
+    candidate_generation_ms = round((time.perf_counter() - candidate_generation_started_at) * 1000.0, 2)
+
     if not all_line1_candidates or not all_line2_candidates:
         raise RuntimeError("No valid split candidates produced OCR results")
 
+    ranking_started_at = time.perf_counter()
     _apply_candidate_support_bonus(all_line1_candidates)
 
     line1_ranked = _rank_candidates(all_line1_candidates, "score")
@@ -548,6 +599,8 @@ def run_ocr(mrz_img):
 
     if best_pair is None:
         raise RuntimeError("No valid line pair selected from OCR candidates")
+
+    ranking_and_pairing_ms = round((time.perf_counter() - ranking_started_at) * 1000.0, 2)
 
     selected_line1_split = best_pair["line1"]["split_label"]
     selected_line2_split = best_pair["line2"]["split_label"]
@@ -657,6 +710,11 @@ def run_ocr(mrz_img):
         "checksum_summary": checks,
         "repairs_applied": best_pair["repairs_applied"],
         "parsed_fields": parsed,
+        "timing_ms": {
+            "total_ocr_ms": round((time.perf_counter() - ocr_started_at) * 1000.0, 2),
+            "candidate_generation_ms": candidate_generation_ms,
+            "ranking_and_pairing_ms": ranking_and_pairing_ms,
+        },
     }
 
     print("\n[OCR] Candidate winner")

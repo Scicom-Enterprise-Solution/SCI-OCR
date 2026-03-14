@@ -104,6 +104,7 @@ def process_document(
     emit_progress: bool = True,
 ) -> dict:
     started_at = time.perf_counter()
+    stage_started_at = started_at
 
     def finalize_report(current_report: dict) -> dict:
         current_report["duration_ms"] = round((time.perf_counter() - started_at) * 1000.0, 2)
@@ -154,6 +155,11 @@ def process_document(
             "parsed": {},
             "ocr": {},
         },
+        "timings": {
+            "stage1_document_preparation_ms": None,
+            "stage2_mrz_detection_ms": None,
+            "stage3_ocr_ms": None,
+        },
     }
 
     log("=" * 60)
@@ -187,6 +193,9 @@ def process_document(
     stage1.save(contour_debug, "contours.png")
 
     if quad_pts is None:
+        report["timings"]["stage1_document_preparation_ms"] = round(
+            (time.perf_counter() - stage_started_at) * 1000.0, 2
+        )
         report["status"] = "failed"
         report["error"] = "stage1_document_contour_not_found"
         finalize_report(report)
@@ -237,11 +246,15 @@ def process_document(
         else:
             log("[Stage 1] Face detection skipped; continuing with MRZ-based orientation fallback.")
 
+    report["timings"]["stage1_document_preparation_ms"] = round(
+        (time.perf_counter() - stage_started_at) * 1000.0, 2
+    )
     log("\n[Stage 1] Complete.\n")
 
     log("=" * 60)
     log("STAGE 2 — MRZ region detection")
     log("=" * 60)
+    stage_started_at = time.perf_counter()
 
     detection_result = None
     detection_input = None
@@ -259,6 +272,9 @@ def process_document(
             log(f"[Stage 2] MRZ not found on {source_label}; retrying next source.")
 
     if not detection_result:
+        report["timings"]["stage2_mrz_detection_ms"] = round(
+            (time.perf_counter() - stage_started_at) * 1000.0, 2
+        )
         report["status"] = "failed"
         report["error"] = "stage2_mrz_not_detected"
         finalize_report(report)
@@ -295,11 +311,15 @@ def process_document(
     debug_img = stage2.draw_debug_boxes(working_aligned, mrz_lines, mrz_bbox)
     stage2.save(debug_img, "mrz_detected.png")
 
+    report["timings"]["stage2_mrz_detection_ms"] = round(
+        (time.perf_counter() - stage_started_at) * 1000.0, 2
+    )
     log("\n[Stage 2] Complete.\n")
 
     log("=" * 60)
     log("STAGE 3 — MRZ OCR")
     log("=" * 60)
+    stage_started_at = time.perf_counter()
 
     mrz_clean = stage3.clean_mrz_image(mrz_crop)
     stage3.save(mrz_clean, "mrz_clean.png")
@@ -321,6 +341,7 @@ def process_document(
     report["mrz"]["text"]["line2"] = line2
     report["mrz"]["parsed"] = ocr_meta.get("parsed_fields") or parse_mrz_td3(line1, line2)
     report["mrz"]["ocr"] = ocr_meta
+    report["timings"]["stage3_ocr_ms"] = round((time.perf_counter() - stage_started_at) * 1000.0, 2)
     report["reference_comparison"] = build_reference_comparison(loaded_input.filename, line1, line2)
     report["status"] = "success"
     finalize_report(report)

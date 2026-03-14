@@ -13,6 +13,20 @@ from mrz.td3.normalize import (
 
 
 PAIR_COUNTRY_MATCH_BONUS = 10.0
+KNOWN_TD3_PASSPORT_DOCUMENT_CODES = {
+    "P<",
+    "PP",
+    "PB",
+    "PD",
+    "PE",
+    "PL",
+    "PM",
+    "PO",
+    "PR",
+    "PS",
+    "PT",
+    "PU",
+}
 
 
 def _max_consonant_run(token: str) -> int:
@@ -50,12 +64,15 @@ def _name_token_score(token: str) -> float:
     n = len(token)
     vowels = sum(1 for c in token if c in "AEIOUY")
 
-    if 3 <= n <= 8:
+    if 3 <= n <= 12:
         score += 12
-    elif 2 <= n <= 10:
+    elif 2 <= n <= 14:
         score += 6
     else:
-        score -= abs(n - 5) * 2
+        score -= abs(n - 8) * 1.5
+
+    if 9 <= n <= 12:
+        score += 8
 
     if vowels >= 2:
         score += 10
@@ -99,10 +116,15 @@ def score_td3_line1(text: str) -> float:
     else:
         score -= abs(len(text) - MRZ_LINE_LEN) * 2
 
-    if len(text) >= 2 and text[0] == "P" and re.fullmatch(r"[A-Z<]", text[1]):
-        score += 20
-    else:
+    document_code = text[:2]
+    if not (len(text) >= 2 and text[0] == "P" and re.fullmatch(r"[A-Z<]", text[1])):
         score -= 20
+    elif document_code == "P<":
+        score += 20
+    elif document_code in KNOWN_TD3_PASSPORT_DOCUMENT_CODES:
+        score += 16
+    else:
+        score += 4
 
     issuing = text[2:5]
     if re.fullmatch(r"[A-Z<]{3}", issuing):

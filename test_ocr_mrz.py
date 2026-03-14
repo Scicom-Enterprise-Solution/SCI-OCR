@@ -120,6 +120,45 @@ class TestLine1Repair(unittest.TestCase):
         self.assertEqual(repaired, normalize_td3_line1(line))
         self.assertEqual(repairs, [])
 
+    def test_repairs_po_prefix_to_passport_filler_for_xcxc_sample(self) -> None:
+        repaired, repairs = repair_td3_line1(
+            "POGINCAMARA<<FATOUMATA<BOBO<<<<<<<<<<<<<<<<<"
+        )
+
+        self.assertEqual(
+            repaired,
+            normalize_td3_line1("P<GINCAMARA<<FATOUMATA<BOBO<<<<<<<<<<<<<<<<<"),
+        )
+        self.assertTrue(any(r["position"] == "document_code" for r in repairs))
+
+    def test_repairs_accidental_double_separator_inside_given_names(self) -> None:
+        repaired, repairs = repair_td3_line1(
+            "P<JORTAWALBEH<<NAKA<AHMAD<ABDEL<<RAHMAN<<<<<"
+        )
+
+        self.assertEqual(
+            repaired,
+            normalize_td3_line1("P<JORTAWALBEH<<NAKA<AHMAD<ABDEL<<RAHMAN<<<<<"),
+        )
+        self.assertEqual(repairs, [])
+
+    def test_repairs_surname_mn_ambiguity_for_rahman(self) -> None:
+        repaired, repairs = repair_td3_line1(
+            "P<BGDRAHMAM<<MD<MAHBUBUR<<<<<<<<<<<<<<<<<<<<"
+        )
+
+        self.assertEqual(
+            repaired,
+            normalize_td3_line1("P<BGDRAHMAN<<MD<MAHBUBUR<<<<<<<<<<<<<<<<<<<<"),
+        )
+        self.assertTrue(any(r["reason"] == "surname_ambiguity_repair" for r in repairs))
+
+    def test_score_prefers_full_dzhakhongir_over_trimmed_dzhakho(self) -> None:
+        full = score_td3_line1("P<RUSAMIRKULOV<<DZHAKHONGIR<<<<<<<<<<<<<<<<<")
+        trimmed = score_td3_line1("P<RUSAMIRKULOV<<DZHAKHO<<<<<<<<<<<<<<<<<<<<<")
+
+        self.assertGreater(full, trimmed)
+
     def test_repairs_noise_before_country_code(self) -> None:
         repaired, meta = repair_issuing_country_code(
             "P<SJORALMOUSA<<AWS<WAJDI<FAROUR<<<<<<<<<<<<<"
@@ -134,6 +173,26 @@ class TestLine1Repair(unittest.TestCase):
         invalid = score_td3_line1("P<SJORALMOUSA<<AWS<WAJDI<FAROUR<<<<<<<<<<<<<")
 
         self.assertGreater(valid, invalid)
+
+    def test_score_prefers_passport_filler_prefix_over_unknown_pc_prefix(self) -> None:
+        expected = score_td3_line1("P<JORALMOUSA<<AWS<WAJDI<FAROUQ<<<<<<<<<<<<<<")
+        weak = score_td3_line1("PCJORALMOUSA<<AWS<WAJDI<FAROUQ<<<<<<<<<<<<<<")
+
+        self.assertGreater(expected, weak)
+
+    def test_score_prefers_passport_filler_prefix_over_po_for_standard_passport_line(self) -> None:
+        expected = score_td3_line1("P<GINCAMARA<<FATOUMATA<BOBO<<<<<<<<<<<<<<<<<")
+        weak = score_td3_line1("POGINCAMARA<<FATOUMATA<BOBO<<<<<<<<<<<<<<<<<")
+
+        self.assertGreater(expected, weak)
+
+    def test_score_accepts_visual_pb_and_pp_prefixes_as_plausible(self) -> None:
+        pb = score_td3_line1("PBLKACOLAMBAGE<<KANISHKA<NETHMI<COLAMBAGE<<<")
+        pp = score_td3_line1("PPLKAPERERA<<THANTHREEGE<SHINE<INNOCENT<<<<<")
+        unknown = score_td3_line1("PCLKAPERERA<<THANTHREEGE<SHINE<INNOCENT<<<<<")
+
+        self.assertGreater(pb, unknown)
+        self.assertGreater(pp, unknown)
 
     def test_score_prefers_valid_multi_token_given_names_over_trimmed_variant(self) -> None:
         full = score_td3_line1("P<MLIDIALLO<<FATOUMATA<ZAHARA<<<<<<<<<<<<<<<")
@@ -280,6 +339,7 @@ class TestOcrSearchProfiles(unittest.TestCase):
             "variant_scales": (2,),
             "variant_thresholds": ("otsu",),
             "split_labels": ("projection", "half"),
+            "variant_workers": 2,
         }
         image = np.array([[0, 255], [255, 0]], dtype=np.uint8)
 
@@ -292,6 +352,28 @@ class TestOcrSearchProfiles(unittest.TestCase):
                 "line1_test_gray_s2_otsu",
                 "line1_test_clahe_s2_otsu",
             },
+        )
+
+    def test_parallel_variant_generation_preserves_order(self) -> None:
+        profile = {
+            "variant_sources": ("gray", "clahe"),
+            "variant_scales": (2,),
+            "variant_thresholds": ("otsu", "adaptive"),
+            "split_labels": ("projection", "half"),
+            "variant_workers": 2,
+        }
+        image = np.array([[0, 255], [255, 0]], dtype=np.uint8)
+
+        variants = _prepare_variants(image, "line1_test", profile)
+
+        self.assertEqual(
+            [variant["variant_id"] for variant in variants],
+            [
+                "line1_test_gray_s2_otsu",
+                "line1_test_gray_s2_adaptive",
+                "line1_test_clahe_s2_otsu",
+                "line1_test_clahe_s2_adaptive",
+            ],
         )
 
     def test_fast_profile_limits_split_candidates(self) -> None:
@@ -318,6 +400,11 @@ class TestOcrSearchProfiles(unittest.TestCase):
             self.assertEqual(search_space["split_count"], 2)
             self.assertEqual(search_space["per_line_variants"], 2)
             self.assertEqual(search_space["total_tesseract_calls"], 8)
+        elif search_space.get("paddle_fast"):
+            self.assertEqual(search_space["psms"], [7, 6, 13])
+            self.assertEqual(search_space["split_count"], 3)
+            self.assertEqual(search_space["per_line_variants"], 4)
+            self.assertEqual(search_space["total_tesseract_calls"], 72)
         else:
             self.assertEqual(search_space["psms"], [7, 6, 13])
             self.assertEqual(search_space["split_count"], 6)

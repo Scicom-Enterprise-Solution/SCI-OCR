@@ -6,6 +6,7 @@ from mrz.td3.normalize import (
     _generate_country_code_variants,
     _sanitize_name_token,
     _sanitize_name_zone,
+    _split_tail_name_tokens,
     normalize_td3_line1,
 )
 from mrz.td3.score import _name_token_score, score_td3_line1
@@ -53,6 +54,17 @@ def _split_given_name_zone(given_raw: str) -> tuple[str, str]:
     given_token = _sanitize_name_token(raw_first)
     given_tail = _sanitize_name_zone(sep + raw_tail) if sep else ""
     return given_token, given_tail
+
+
+def _normalize_given_tail(given_tail: str) -> str:
+    # Preserve explicit double separators inside the tail; collapsing them
+    # can rewrite visible truth in multi-token given-name zones.
+    if "<<" in (given_tail or "").strip("<"):
+        return given_tail
+    tail_tokens, tail_remainder = _split_tail_name_tokens(given_tail)
+    if not tail_tokens:
+        return given_tail
+    return "<" + "<".join(tail_tokens) + tail_remainder
 
 
 def _build_td3_line1(
@@ -123,6 +135,102 @@ def _build_filler_tail(length: int) -> str:
     if length <= 0:
         return ""
     return "<" * length
+
+
+def repair_document_code(line1: str) -> tuple[str, dict | None]:
+    line = normalize_td3_line1(line1)
+    document_code = line[:2]
+
+    if document_code != "PO":
+        return line, None
+
+    repaired = normalize_td3_line1("P<" + line[2:])
+    if score_td3_line1(repaired) <= score_td3_line1(line):
+        return line, None
+
+    return repaired, {
+        "field": "line1",
+        "position": "document_code",
+        "from": document_code,
+        "to": "P<",
+        "reason": "prefer_passport_filler_document_code",
+    }
+
+
+def repair_surname_ambiguity(
+    issuing_country: str,
+    surname: str,
+    given_token: str,
+    given_tail: str,
+    *,
+    document_code: str,
+) -> tuple[str, dict | None]:
+    if not surname or not any(ch in {"M", "N"} for ch in surname):
+        return surname, None
+
+    baseline_line = _build_td3_line1(
+        issuing_country,
+        surname,
+        given_token,
+        given_tail,
+        document_code=document_code,
+    )
+    baseline_score = score_td3_line1(baseline_line)
+
+    candidates = {surname}
+    for i, ch in enumerate(surname):
+        if ch == "M":
+            candidates.add(surname[:i] + "N" + surname[i + 1:])
+        elif ch == "N":
+            candidates.add(surname[:i] + "M" + surname[i + 1:])
+
+    ranked = []
+    for candidate in candidates:
+        rebuilt = _build_td3_line1(
+            issuing_country,
+            candidate,
+            given_token,
+            given_tail,
+            document_code=document_code,
+        )
+        ranked.append((
+            score_td3_line1(rebuilt),
+            _name_token_score(candidate),
+            candidate.endswith("N"),
+            -candidate.count("M"),
+            candidate,
+        ))
+
+    _, _, _, _, best = max(ranked)
+    if best == surname:
+        return surname, None
+
+    repaired_line = _build_td3_line1(
+        issuing_country,
+        best,
+        given_token,
+        given_tail,
+        document_code=document_code,
+    )
+    repaired_score = score_td3_line1(repaired_line)
+    if repaired_score < baseline_score:
+        return surname, None
+
+    if not (
+        best.endswith("MAN")
+        and surname.endswith("M")
+        and not surname.endswith("MAN")
+    ):
+        return surname, None
+
+    return best, {
+        "field": "line1",
+        "position": "surname",
+        "from": surname,
+        "to": best,
+        "reason": "surname_ambiguity_repair",
+        "score_gain": round(repaired_score - baseline_score, 2),
+    }
 
 
 def _candidate_given_zone_repairs(given_raw: str) -> list[dict]:
@@ -291,6 +399,10 @@ def repair_td3_line1(line1: str, *, trim_line1_spill_func) -> tuple[str, list[di
     if not line.startswith("P"):
         return line, repairs
 
+    line, document_code_repair = repair_document_code(line)
+    if document_code_repair is not None:
+        repairs.append(document_code_repair)
+
     document_code = line[:2]
     line, country_repair = repair_issuing_country_code(line)
     if country_repair is not None:
@@ -309,6 +421,8 @@ def repair_td3_line1(line1: str, *, trim_line1_spill_func) -> tuple[str, list[di
     if not surname:
         return line, repairs
 
+    given_tail = _normalize_given_tail(given_tail)
+
     if 3 <= len(surname) <= 10:
         repaired_surname, meta = repair_given_name_token(surname)
         if meta["changed"]:
@@ -323,10 +437,20 @@ def repair_td3_line1(line1: str, *, trim_line1_spill_func) -> tuple[str, list[di
             })
             surname = repaired_surname
 
+    surname, surname_repair = repair_surname_ambiguity(
+        issuing_country,
+        surname,
+        given_token,
+        given_tail,
+        document_code=document_code,
+    )
+    if surname_repair is not None:
+        repairs.append(surname_repair)
+
     repaired_given_token, repaired_given_tail, given_zone_repair = repair_given_name_zone(
         issuing_country,
         surname,
-        given_raw,
+        f"{given_token}{given_tail}",
         document_code=document_code,
     )
     if given_zone_repair is not None:
@@ -395,8 +519,10 @@ def repair_paddle_line1_candidate(line1: str, *, trim_line1_spill_func) -> tuple
     if not surname:
         return line, None
 
-    baseline_score = score_td3_line1(line)
     given_token, given_tail = _split_given_name_zone(given_raw)
+    given_tail = _normalize_given_tail(given_tail)
+
+    baseline_score = score_td3_line1(line)
     ranked = []
     surname_variants = {surname}
     for i, ch in enumerate(surname):
@@ -415,8 +541,8 @@ def repair_paddle_line1_candidate(line1: str, *, trim_line1_spill_func) -> tuple
         )
         ranked.append((
             score_td3_line1(rebuilt),
-            variant.count("M") - surname.count("M"),
-            surname.count("N") - variant.count("N"),
+            variant.endswith("MAN"),
+            variant.count("M") - variant.count("N"),
             variant,
             rebuilt,
         ))

@@ -1,3 +1,6 @@
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import cv2
 import numpy as np
 
@@ -6,6 +9,10 @@ FAST_OCR_VARIANT_SOURCES = ("gray", "clahe")
 FAST_OCR_VARIANT_SCALES = (2,)
 FAST_OCR_VARIANT_THRESHOLDS = ("otsu",)
 FAST_OCR_SPLIT_LABELS = ("projection", "half")
+PADDLE_FAST_VARIANT_SOURCES = ("gray", "clahe")
+PADDLE_FAST_VARIANT_SCALES = (2,)
+PADDLE_FAST_VARIANT_THRESHOLDS = ("otsu", "adaptive")
+PADDLE_FAST_SPLIT_LABELS = ("projection", "half", "projection_p4")
 
 
 def clean_mrz_image(mrz_img):
@@ -73,13 +80,23 @@ def _cap_width(img, max_width: int):
     return cv2.resize(img, (max_width, target_height), interpolation=cv2.INTER_AREA)
 
 
-def ocr_search_profile(fast_ocr: bool) -> dict:
+def ocr_search_profile(fast_ocr: bool, *, paddle_fast: bool = False, ocr_backend: str = "") -> dict:
+    if paddle_fast and ocr_backend == "paddle":
+        return {
+            "variant_sources": PADDLE_FAST_VARIANT_SOURCES,
+            "variant_scales": PADDLE_FAST_VARIANT_SCALES,
+            "variant_thresholds": PADDLE_FAST_VARIANT_THRESHOLDS,
+            "split_labels": PADDLE_FAST_SPLIT_LABELS,
+            "profile_name": "paddle_fast",
+        }
+
     if fast_ocr:
         return {
             "variant_sources": FAST_OCR_VARIANT_SOURCES,
             "variant_scales": FAST_OCR_VARIANT_SCALES,
             "variant_thresholds": FAST_OCR_VARIANT_THRESHOLDS,
             "split_labels": FAST_OCR_SPLIT_LABELS,
+            "profile_name": "fast",
         }
 
     return {
@@ -94,6 +111,7 @@ def ocr_search_profile(fast_ocr: bool) -> dict:
             "projection_m8",
             "projection_p8",
         ),
+        "profile_name": "exhaustive",
     }
 
 
@@ -105,42 +123,55 @@ def prepare_variants(gray, prefix: str, profile: dict):
     if "clahe" in variant_sources:
         base_images["clahe"] = _apply_clahe(gray)
 
-    for source_name in variant_sources:
+    tasks = [
+        (source_name, scale, threshold_name)
+        for source_name in variant_sources
+        for scale in profile["variant_scales"]
+        for threshold_name in profile["variant_thresholds"]
+    ]
+
+    def build_variant(task):
+        source_name, scale, threshold_name = task
         base = base_images[source_name]
-        for scale in profile["variant_scales"]:
-            scaled = _resize(base, scale)
+        scaled = _resize(base, scale)
 
-            otsu = None
-            for threshold_name in profile["variant_thresholds"]:
-                if threshold_name == "otsu":
-                    if otsu is None:
-                        otsu = _otsu_thresh(scaled)
-                    image = otsu
-                    morph = "none"
-                    threshold = "otsu"
-                elif threshold_name == "adaptive":
-                    image = _adaptive_thresh(scaled)
-                    morph = "none"
-                    threshold = "adaptive"
-                elif threshold_name == "otsu_thick":
-                    if otsu is None:
-                        otsu = _otsu_thresh(scaled)
-                    image = _thicken(otsu)
-                    morph = "dilate"
-                    threshold = "otsu"
-                else:
-                    continue
+        if threshold_name == "otsu":
+            image = _otsu_thresh(scaled)
+            morph = "none"
+            threshold = "otsu"
+        elif threshold_name == "adaptive":
+            image = _adaptive_thresh(scaled)
+            morph = "none"
+            threshold = "adaptive"
+        elif threshold_name == "otsu_thick":
+            image = _thicken(_otsu_thresh(scaled))
+            morph = "dilate"
+            threshold = "otsu"
+        else:
+            return None
 
-                variants.append({
-                    "variant_id": f"{prefix}_{source_name}_s{scale}_{threshold_name}",
-                    "image": image,
-                    "meta": {
-                        "scale": scale,
-                        "source": source_name,
-                        "threshold": threshold,
-                        "morph": morph,
-                    },
-                })
+        return {
+            "variant_id": f"{prefix}_{source_name}_s{scale}_{threshold_name}",
+            "image": image,
+            "meta": {
+                "scale": scale,
+                "source": source_name,
+                "threshold": threshold,
+                "morph": morph,
+            },
+        }
+
+    worker_count = int(profile.get("variant_workers", 1))
+    if worker_count <= 1 or len(tasks) <= 1:
+        iterator = map(build_variant, tasks)
+    else:
+        max_workers = min(worker_count, len(tasks), os.cpu_count() or 1)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            iterator = executor.map(build_variant, tasks)
+            variants.extend(variant for variant in iterator if variant is not None)
+        return variants
+
+    variants.extend(variant for variant in iterator if variant is not None)
 
     return variants
 
@@ -255,8 +286,15 @@ def build_split_candidates(gray, base_meta: dict, profile: dict):
     return candidates
 
 
-def estimate_ocr_search_space(*, fast_ocr: bool, tesseract_psms: list[int], tesseract_oems: list[int]) -> dict:
-    profile = ocr_search_profile(fast_ocr)
+def estimate_ocr_search_space(
+    *,
+    fast_ocr: bool,
+    tesseract_psms: list[int],
+    tesseract_oems: list[int],
+    paddle_fast: bool = False,
+    ocr_backend: str = "",
+) -> dict:
+    profile = ocr_search_profile(fast_ocr, paddle_fast=paddle_fast, ocr_backend=ocr_backend)
     per_line_variants = (
         len(profile["variant_sources"])
         * len(profile["variant_scales"])
@@ -267,6 +305,8 @@ def estimate_ocr_search_space(*, fast_ocr: bool, tesseract_psms: list[int], tess
 
     return {
         "fast_ocr": fast_ocr,
+        "paddle_fast": bool(paddle_fast and ocr_backend == "paddle"),
+        "profile_name": profile.get("profile_name", "unknown"),
         "psms": list(tesseract_psms),
         "oems": list(tesseract_oems),
         "split_count": split_count,
