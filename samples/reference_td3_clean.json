@@ -1,0 +1,107 @@
+{
+  "doc_type": "TD3_PASSPORT",
+  "format": "TD3",
+  "description": "Visual-truth clean reference set for TD3 passport MRZ samples.",
+  "samples": [
+    {
+      "line1": "P<BGDRABBY<<MD<MOSTAHIDUL<ISLAM<<<<<<<<<<<<<",
+      "line2": "A142017137BGD0203317M34022694214826200<<<<76",
+      "filename": "11.png"
+    },
+    {
+      "line1": "P<PAKQAISER<<DAWOOD<<<<<<<<<<<<<<<<<<<<<<<<<",
+      "line2": "EY49114227PAK0607096M34102114250182091423<56",
+      "filename": "045536.png"
+    },
+    {
+      "line1": "P<BGDAHMAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<",
+      "line2": "A216182761BGD1703191F31013117121338310439948",
+      "filename": "adeela_new.png"
+    },
+    {
+      "line1": "P<BGDAHMAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<",
+      "line2": "EK01488182BGD1703191F2701253<<<<<<<<<<<<<<06",
+      "filename": "adeela_old.png"
+    },
+    {
+      "line1": "P<BGDAHAMED<<INAM<<<<<<<<<<<<<<<<<<<<<<<<<<<",
+      "line2": "A216182772BGD8201010M36013168683510559<<<<22",
+      "filename": "inam_new.png"
+    },
+    {
+      "line1": "P<BGDAHAMED<<INAM<<<<<<<<<<<<<<<<<<<<<<<<<<<",
+      "line2": "EK01482490BGD8201010M27012531213383168395<12",
+      "filename": "inam_old.png"
+    },
+    {
+      "line1": "P<PAKWAQAR<<SADIA<<<<<<<<<<<<<<<<<<<<<<<<<<<",
+      "line2": "AP63227825PAK8909257F29022453340206172788<18",
+      "filename": "sadia.png"
+    },
+    {
+      "line1": "P<INDMURMU<<ANGELYN<LILY<SANA<<<<<<<<<<<<<<<",
+      "line2": "AI929233<6IND0704065F36020140075940579626<08",
+      "filename": "sasa.png"
+    },
+    {
+      "line1": "P<JORALMOUSA<<AWS<WAJDI<FAROUQ<<<<<<<<<<<<<<",
+      "line2": "T1493973<9JOR0706265M31030839000186766<<<<56",
+      "filename": "sasas.png"
+    },
+    {
+      "line1": "P<BGDALAM<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<",
+      "line2": "A098919372BGD0601038M36020815119012168<<<<26",
+      "filename": "sss.png"
+    },
+    {
+      "line1": "PPMLIDIALLO<<FATOUMATA<ZAHARA<<<<<<<<<<<<<<<",
+      "line2": "PP00242392MLI0608118F31010672060910200913878",
+      "filename": "ww.png"
+    },
+    {
+      "line1": "P<GINCAMARA<<FATOUMATA<BOBO<<<<<<<<<<<<<<<<<",
+      "line2": "O007341557GIN0012083F27051142001208017021578",
+      "filename": "xcxc.png"
+    },
+    {
+      "line1": "P<JORTAWALBEH<<NAKA<AHMAD<ABDEL<RAHMAN<<<<<",
+      "line2": "U0481106<2JOR0104056F31021672000268275<<<<06",
+      "filename": "1.png"
+    },
+    {
+      "line1": "PBLKACOLAMBAGE<<KANISHKA<NETHMI<COLAMBAGE<<<",
+      "line2": "P0847787<6LKA0310077F3512115200378113409<<44",
+      "filename": "2.png"
+    },
+    {
+      "line1": "P<INDKAUR<<HARPREET<<<<<<<<<<<<<<<<<<<<<<<<<",
+      "line2": "W8788084<3IND9801107F33032293067650014623<98",
+      "filename": "3.png"
+    },
+    {
+      "line1": "P<BGDRAHMAN<<MD<MAHBUBUR<<<<<<<<<<<<<<<<<<<<",
+      "line2": "A132435974BGD0207278M33112041030761520<<<<18",
+      "filename": "4.png"
+    },
+    {
+      "line1": "P<NGAUZOIGWE<<CHINENYE<PRISCILLIA<<<<<<<<<<<",
+      "line2": "B028388248NGA7412051F281010266005583494<<<48",
+      "filename": "5.png"
+    },
+    {
+      "line1": "P<AFGMORADI<<ZAHRA<<<<<<<<<<<<<<<<<<<<<<<<<<",
+      "line2": "P095038352AFG9710197F3007147<<<<<<<<<<<<<<08",
+      "filename": "6.png"
+    },
+    {
+      "line1": "P<RUSAMIRKULOV<<DZHAKHONGIR<<<<<<<<<<<<<<<<<",
+      "line2": "5513564551RUS0307307M3403048<<<<<<<<<<<<<<00",
+      "filename": "7.png"
+    },
+    {
+      "line1": "PPLKAPERERA<<THANTHREEGE<SHINE<INNOCENT<<<<<",
+      "line2": "P1005915<4LKA9812150M3602265199835011276<<86",
+      "filename": "8.png"
+    }
+  ]
+}

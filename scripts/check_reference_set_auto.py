@@ -10,13 +10,16 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from samples.reference_utils import normalize_reference_samples
+
 
 def main() -> int:
     root = ROOT
-    refs_path = root / "samples" / "reference_clean.json"
+    refs_path = root / "samples" / "reference_td3_clean.json"
 
     with refs_path.open("r", encoding="utf-8") as f:
-        refs = json.load(f)
+        payload = json.load(f)
+    refs = normalize_reference_samples(payload)
 
     passes = []
     fails = []

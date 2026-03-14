@@ -1,16 +1,19 @@
 import json
 import os
+import time
 
 import cv2
 
 from document_inputs import DocumentInputError, SUPPORTED_IMAGE_EXTS, load_document_input
 from face_detection import orient_with_face_hint, extract_face_crop, draw_face_box
-from mrz.rotation import detect_mrz_with_rotation_fallback
+from logger_utils import print_reference_summary
+from mrz.td3.rotation import detect_mrz_with_rotation_fallback
 from report_utils import parse_mrz_td3, write_pipeline_report
+from samples.reference_utils import normalize_reference_samples
 
 from document_preparation import passport as stage1
-from mrz import detect as stage2
-from mrz import ocr_pipeline as stage3
+from mrz.td3 import detect as stage2
+from mrz.td3 import ocr_pipeline as stage3
 
 
 def _make_logger(enabled: bool):
@@ -21,7 +24,7 @@ def build_reference_comparison(filename: str, line1: str, line2: str) -> dict:
     reference_path = os.path.join(
         os.path.dirname(os.path.dirname(__file__)),
         "samples",
-        "reference_clean.json",
+        "reference_td3_clean.json",
     )
 
     comparison = {
@@ -35,10 +38,18 @@ def build_reference_comparison(filename: str, line1: str, line2: str) -> dict:
 
     try:
         with open(reference_path, "r", encoding="utf-8") as f:
-            refs = json.load(f)
+            payload = json.load(f)
     except (OSError, json.JSONDecodeError):
         comparison["reference_error"] = "reference_file_unreadable"
         return comparison
+
+    refs = normalize_reference_samples(payload)
+    if not isinstance(refs, dict):
+        comparison["reference_error"] = "reference_file_invalid_structure"
+        return comparison
+
+    comparison["reference_doc_type"] = payload.get("doc_type")
+    comparison["reference_format"] = payload.get("format")
 
     expected = refs.get(filename)
     if not isinstance(expected, dict):
@@ -63,25 +74,7 @@ def build_reference_comparison(filename: str, line1: str, line2: str) -> dict:
 
 
 def print_reference_comparison(comparison: dict) -> None:
-    if not comparison.get("reference_available"):
-        print("[Reference] No reference entry for this sample.")
-        return
-
-    line1_match = comparison.get("line1_match", False)
-    line2_match = comparison.get("line2_match", False)
-    exact_match = comparison.get("exact_match", False)
-
-    print(
-        "[Reference] "
-        f"{'PASS' if exact_match else 'FAIL'} "
-        f"(line1={'PASS' if line1_match else 'FAIL'}, "
-        f"line2={'PASS' if line2_match else 'FAIL'})"
-    )
-
-    if not line1_match:
-        print(f"[Reference] Expected line1: {comparison['expected']['line1']}")
-    if not line2_match:
-        print(f"[Reference] Expected line2: {comparison['expected']['line2']}")
+    print_reference_summary(comparison)
 
 
 def build_output_prefix(filename: str) -> str:
@@ -110,6 +103,12 @@ def process_document(
     use_face_hint: bool = True,
     emit_progress: bool = True,
 ) -> dict:
+    started_at = time.perf_counter()
+
+    def finalize_report(current_report: dict) -> dict:
+        current_report["duration_ms"] = round((time.perf_counter() - started_at) * 1000.0, 2)
+        return current_report
+
     log = _make_logger(emit_progress)
     loaded_input = load_document_input(
         input_path=input_path,
@@ -190,6 +189,7 @@ def process_document(
     if quad_pts is None:
         report["status"] = "failed"
         report["error"] = "stage1_document_contour_not_found"
+        finalize_report(report)
         report["report_path"] = write_pipeline_report(output_dir, report)
         log(f"[Report] {report['report_path']}")
         log("\n[Pipeline] STAGE 1 FAILED: could not locate a document boundary.")
@@ -261,6 +261,7 @@ def process_document(
     if not detection_result:
         report["status"] = "failed"
         report["error"] = "stage2_mrz_not_detected"
+        finalize_report(report)
         report["report_path"] = write_pipeline_report(output_dir, report)
         log(f"[Report] {report['report_path']}")
         log("\n[Pipeline] STAGE 2 FAILED: MRZ region not detected.")
@@ -322,6 +323,7 @@ def process_document(
     report["mrz"]["ocr"] = ocr_meta
     report["reference_comparison"] = build_reference_comparison(loaded_input.filename, line1, line2)
     report["status"] = "success"
+    finalize_report(report)
 
     report["report_path"] = write_pipeline_report(output_dir, report)
     log(f"[Report] {report['report_path']}")

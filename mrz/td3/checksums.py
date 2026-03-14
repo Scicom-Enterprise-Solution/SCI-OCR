@@ -1,8 +1,8 @@
 import itertools
 import re
 
-from mrz.country_codes import is_valid_mrz_country_code
-from mrz.normalize import (
+from mrz.td3.country_codes import is_valid_mrz_country_code
+from mrz.td3.normalize import (
     _ambiguous_doc_char_count,
     _generate_country_code_variants,
     _normalize_numeric_field,

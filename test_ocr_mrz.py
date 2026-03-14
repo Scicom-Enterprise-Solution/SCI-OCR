@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 from unittest import mock
 
-from mrz.ocr_pipeline import (
+from mrz.td3.ocr_pipeline import (
     _apply_candidate_support_bonus,
     _best_paddle_text_candidate,
     _line1_selection_penalty,
@@ -33,10 +33,10 @@ from mrz.ocr_pipeline import (
 
 
 class TestLine1Repair(unittest.TestCase):
-    def test_normalize_td3_line1_collapses_po_prefix_to_passport_prefix(self) -> None:
+    def test_normalize_td3_line1_preserves_two_character_document_code(self) -> None:
         line = normalize_td3_line1("POJORALMOUSA<<AWS<WAJDI<FAROUR<<<<<<<<<<<<<")
 
-        self.assertEqual(line[:5], "P<JOR")
+        self.assertEqual(line[:5], "POJOR")
 
     def test_preserves_valid_name_ending_in_t(self) -> None:
         line = normalize_td3_line1("P<PAKALAM<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<")
@@ -90,11 +90,27 @@ class TestLine1Repair(unittest.TestCase):
         self.assertTrue(any(r["position"] == "given_name_zone" for r in repairs))
 
     def test_preserves_reference_given_names_for_ww_sample(self) -> None:
-        line = "P<MLIDIALLO<<FATOUMATA<ZAHARA<<<<<<<<<<<<<<<"
+        line = "PPMLIDIALLO<<FATOUMATA<ZAHARA<<<<<<<<<<<<<<<"
 
         repaired, _ = repair_td3_line1(line)
 
         self.assertEqual(repaired, normalize_td3_line1(line))
+
+    def test_preserves_visual_pb_prefix_for_sri_lankan_sample(self) -> None:
+        line = "PBLKACOLAMBAGE<<KANISHKA<NETHMI<COLAMBAGE<<<"
+
+        repaired, repairs = repair_td3_line1(line)
+
+        self.assertEqual(repaired, normalize_td3_line1(line))
+        self.assertEqual(repairs, [])
+
+    def test_preserves_visual_pp_prefix_for_sri_lankan_sample(self) -> None:
+        line = "PPLKAPERERA<<THANTHREEGE<SHINE<INNOCENT<<<<<"
+
+        repaired, repairs = repair_td3_line1(line)
+
+        self.assertEqual(repaired, normalize_td3_line1(line))
+        self.assertEqual(repairs, [])
 
     def test_preserves_reference_given_names_for_xcxc_sample(self) -> None:
         line = "P<GINCAMARA<<FATOUMATA<BOBO<<<<<<<<<<<<<<<<<"
@@ -314,7 +330,7 @@ class TestOcrBackendSelection(unittest.TestCase):
         previous = os.environ.get("OCR_BACKEND")
         os.environ["OCR_BACKEND"] = "tesseract"
         try:
-            from mrz import ocr_pipeline
+            from mrz.td3 import ocr_pipeline
             importlib.reload(ocr_pipeline)
             self.assertEqual(ocr_pipeline._resolve_ocr_backends(), ["tesseract"])
         finally:
@@ -322,7 +338,7 @@ class TestOcrBackendSelection(unittest.TestCase):
                 os.environ.pop("OCR_BACKEND", None)
             else:
                 os.environ["OCR_BACKEND"] = previous
-            from mrz import ocr_pipeline
+            from mrz.td3 import ocr_pipeline
             importlib.reload(ocr_pipeline)
 
 class TestPaddleOcrAdapter(unittest.TestCase):
@@ -331,7 +347,7 @@ class TestPaddleOcrAdapter(unittest.TestCase):
         fake_paddle.device.is_compiled_with_cuda.return_value = True
         fake_paddle.device.cuda.device_count.return_value = 1
 
-        with mock.patch("mrz.ocr_pipeline.PADDLEOCR_USE_GPU", True):
+        with mock.patch("mrz.td3.ocr_pipeline.PADDLEOCR_USE_GPU", True):
             with mock.patch.dict(sys.modules, {"paddle": fake_paddle}):
                 self.assertTrue(_resolve_paddle_use_gpu())
 
@@ -343,7 +359,7 @@ class TestPaddleOcrAdapter(unittest.TestCase):
                 seen["shape"] = img.shape
                 return [{"rec_texts": ["P<PAKWAQAR<<SADIA"]}]
 
-        with mock.patch("mrz.ocr_pipeline._get_paddle_ocr", return_value=FakePaddleOCR()):
+        with mock.patch("mrz.td3.ocr_pipeline._get_paddle_ocr", return_value=FakePaddleOCR()):
             text = _paddle_ocr_image(np.full((12, 24), 255, dtype=np.uint8))
 
         self.assertEqual(seen["shape"], (12, 24, 3))

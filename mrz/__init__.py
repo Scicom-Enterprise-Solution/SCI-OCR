@@ -1,1 +1,1 @@
-"""MRZ-specific normalization, scoring, repair, and OCR helpers."""
+"""MRZ package with document-format-specific implementations."""

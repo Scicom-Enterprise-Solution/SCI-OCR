@@ -16,13 +16,14 @@ def normalize_mrz(text: str) -> str:
 def normalize_td3_line1(text: str) -> str:
     text = normalize_mrz(text)
 
-    if not text.startswith("P<"):
-        if text.startswith(("PO", "P0")):
-            text = "P<" + text[2:]
-        elif text.startswith("PK"):
-            text = "P<" + text[2:]
-        elif text.startswith("P"):
-            text = "P<" + text[1:]
+    if text.startswith("P") and len(text) >= 2:
+        second = text[1]
+        if second == "0":
+            text = "PO" + text[2:]
+    elif text.startswith("P"):
+        text = "P<"
+    elif text.startswith(("PO", "P0")):
+        text = "PO" + text[2:]
 
     text = text[:MRZ_LINE_LEN].ljust(MRZ_LINE_LEN, "<")
     return text

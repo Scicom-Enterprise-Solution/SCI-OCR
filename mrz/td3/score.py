@@ -1,8 +1,8 @@
 import re
 
-from mrz.country_codes import is_valid_mrz_country_code
-from mrz.checksums import validate_td3_checks
-from mrz.normalize import (
+from mrz.td3.country_codes import is_valid_mrz_country_code
+from mrz.td3.checksums import validate_td3_checks
+from mrz.td3.normalize import (
     MRZ_LINE_LEN,
     _ambiguous_doc_char_count,
     _sanitize_name_token,
@@ -99,7 +99,7 @@ def score_td3_line1(text: str) -> float:
     else:
         score -= abs(len(text) - MRZ_LINE_LEN) * 2
 
-    if text.startswith("P<"):
+    if len(text) >= 2 and text[0] == "P" and re.fullmatch(r"[A-Z<]", text[1]):
         score += 20
     else:
         score -= 20

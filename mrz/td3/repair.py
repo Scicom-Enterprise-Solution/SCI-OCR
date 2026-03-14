@@ -1,14 +1,14 @@
 import itertools
 import re
 
-from mrz.normalize import (
+from mrz.td3.normalize import (
     MRZ_LINE_LEN,
     _generate_country_code_variants,
     _sanitize_name_token,
     _sanitize_name_zone,
     normalize_td3_line1,
 )
-from mrz.score import _name_token_score, score_td3_line1
+from mrz.td3.score import _name_token_score, score_td3_line1
 
 
 TOKEN_AMBIGUOUS_SUBS = {
@@ -60,7 +60,16 @@ def _build_td3_line1(
     surname: str,
     given_token: str,
     given_tail: str = "",
+    document_code: str = "P<",
 ) -> str:
+    document_code = re.sub(r"[^A-Z<]", "", (document_code or "P<")).upper()
+    if document_code.startswith("P") and len(document_code) >= 2:
+        document_code = document_code[:2]
+    elif document_code.startswith("P"):
+        document_code = "P<"
+    else:
+        document_code = "P<"
+
     issuing_country = re.sub(r"[^A-Z<]", "", (issuing_country or ""))
     issuing_country = issuing_country[:3].ljust(3, "<")
     surname = _sanitize_name_token(surname)
@@ -70,7 +79,7 @@ def _build_td3_line1(
     if given_tail and not given_tail.startswith("<"):
         given_tail = "<" + given_tail
 
-    rebuilt = f"P<{issuing_country}{surname}<<{given_token}{given_tail}"
+    rebuilt = f"{document_code}{issuing_country}{surname}<<{given_token}{given_tail}"
     return rebuilt[:MRZ_LINE_LEN].ljust(MRZ_LINE_LEN, "<")
 
 
@@ -127,7 +136,7 @@ def _candidate_given_zone_repairs(given_raw: str) -> list[dict]:
         "reason": "baseline",
     }]
 
-    if 3 <= len(raw_token) <= 12:
+    if 3 <= len(raw_token) <= 8:
         repaired_token, meta = repair_given_name_token(raw_token)
         if meta["changed"]:
             candidates.append({
@@ -167,6 +176,7 @@ def repair_given_name_zone(
     issuing_country: str,
     surname: str,
     given_raw: str,
+    document_code: str = "P<",
 ) -> tuple[str, str, dict | None]:
     baseline_token, baseline_tail = _split_given_name_zone(given_raw)
     baseline_line = _build_td3_line1(
@@ -174,6 +184,7 @@ def repair_given_name_zone(
         surname,
         baseline_token,
         baseline_tail,
+        document_code=document_code,
     )
     baseline_score = score_td3_line1(baseline_line)
 
@@ -184,7 +195,13 @@ def repair_given_name_zone(
         if not given_token:
             continue
 
-        line = _build_td3_line1(issuing_country, surname, given_token, given_tail)
+        line = _build_td3_line1(
+            issuing_country,
+            surname,
+            given_token,
+            given_tail,
+            document_code=document_code,
+        )
         score = score_td3_line1(line)
         ranked.append((score, given_token, given_tail, candidate["reason"]))
 
@@ -221,18 +238,19 @@ def repair_given_name_zone(
 def repair_issuing_country_code(line1: str) -> tuple[str, dict | None]:
     line = normalize_td3_line1(line1)
 
-    if not line.startswith("P<"):
+    if not line.startswith("P"):
         return line, None
 
+    document_code = line[:2]
     issuing_country = line[2:5]
-    from mrz.country_codes import is_valid_mrz_country_code
+    from mrz.td3.country_codes import is_valid_mrz_country_code
 
     if is_valid_mrz_country_code(issuing_country):
         return line, None
 
     shifted_country = line[3:6]
     if is_valid_mrz_country_code(shifted_country):
-        repaired = normalize_td3_line1(line[:2] + line[3:])
+        repaired = normalize_td3_line1(document_code + line[3:])
         return repaired, {
             "field": "line1",
             "position": "issuing_country",
@@ -252,11 +270,11 @@ def repair_issuing_country_code(line1: str) -> tuple[str, dict | None]:
     best_country = max(
         valid_variants,
         key=lambda candidate: (
-            score_td3_line1(line[:2] + candidate + line[5:]),
+            score_td3_line1(document_code + candidate + line[5:]),
             candidate,
         ),
     )
-    repaired = normalize_td3_line1(line[:2] + best_country + line[5:])
+    repaired = normalize_td3_line1(document_code + best_country + line[5:])
     return repaired, {
         "field": "line1",
         "position": "issuing_country",
@@ -270,9 +288,10 @@ def repair_td3_line1(line1: str, *, trim_line1_spill_func) -> tuple[str, list[di
     repairs = []
     line = trim_line1_spill_func(line1)
 
-    if not line.startswith("P<"):
+    if not line.startswith("P"):
         return line, repairs
 
+    document_code = line[:2]
     line, country_repair = repair_issuing_country_code(line)
     if country_repair is not None:
         repairs.append(country_repair)
@@ -308,13 +327,20 @@ def repair_td3_line1(line1: str, *, trim_line1_spill_func) -> tuple[str, list[di
         issuing_country,
         surname,
         given_raw,
+        document_code=document_code,
     )
     if given_zone_repair is not None:
         given_token = repaired_given_token
         given_tail = repaired_given_tail
         repairs.append(given_zone_repair)
 
-    rebuilt = _build_td3_line1(issuing_country, surname, given_token, given_tail)
+    rebuilt = _build_td3_line1(
+        issuing_country,
+        surname,
+        given_token,
+        given_tail,
+        document_code=document_code,
+    )
 
     if rebuilt != line:
         repairs.append({
@@ -330,7 +356,13 @@ def repair_td3_line1(line1: str, *, trim_line1_spill_func) -> tuple[str, list[di
     if 3 <= len(given_token) <= 8:
         repaired_token, meta = repair_given_name_token(given_token)
         if meta["changed"]:
-            rebuilt2 = _build_td3_line1(issuing_country, surname, repaired_token, given_tail)
+            rebuilt2 = _build_td3_line1(
+                issuing_country,
+                surname,
+                repaired_token,
+                given_tail,
+                document_code=document_code,
+            )
             repairs.append({
                 "field": "line1",
                 "position": "given_name_token",
@@ -348,9 +380,10 @@ def repair_td3_line1(line1: str, *, trim_line1_spill_func) -> tuple[str, list[di
 def repair_paddle_line1_candidate(line1: str, *, trim_line1_spill_func) -> tuple[str, dict | None]:
     line = trim_line1_spill_func(line1)
 
-    if not line.startswith("P<"):
+    if not line.startswith("P"):
         return line, None
 
+    document_code = line[:2]
     name_zone = line[5:]
     if "<<" not in name_zone:
         return line, None
@@ -373,7 +406,13 @@ def repair_paddle_line1_candidate(line1: str, *, trim_line1_spill_func) -> tuple
             surname_variants.add(surname[:i] + "N" + surname[i + 1:])
 
     for variant in surname_variants:
-        rebuilt = _build_td3_line1(issuing_country, variant, given_token, given_tail)
+        rebuilt = _build_td3_line1(
+            issuing_country,
+            variant,
+            given_token,
+            given_tail,
+            document_code=document_code,
+        )
         ranked.append((
             score_td3_line1(rebuilt),
             variant.count("M") - surname.count("M"),

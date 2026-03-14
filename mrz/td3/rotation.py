@@ -1,5 +1,5 @@
 import cv2
-from mrz import detect as stage2
+from mrz.td3 import detect as stage2
 
 
 def _with_prefix(filename: str, prefix: str | None) -> str:

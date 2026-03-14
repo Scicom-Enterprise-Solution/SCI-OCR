@@ -63,6 +63,8 @@ FAST_OCR=true python run_pipeline.py samples/xcxc.png
 FAST_OCR=false python run_pipeline.py samples/xcxc.png
 python run_pipeline.py samples/sadia.png
 OCR_BACKEND=auto python run_pipeline.py samples/sadia.png
+DEBUG=True python run_pipeline.py samples/sadia.png
+LOG_FORMAT=json python run_pipeline.py samples/sadia.png
 ```
 
 Use `FAST_OCR=true` only for quick smoke tests. For production MRZ extraction, keep the exhaustive profile enabled.
@@ -74,8 +76,9 @@ The project is organized so reusable OCR infrastructure stays separate from MRZ-
 - `document_inputs/` - image and PDF loading/decoding
 - `ocr_backends/` - OCR engine integrations such as PaddleOCR and Tesseract
 - `pipelines/` - task orchestration layers
-- `mrz/` - MRZ-specific detection, normalization, checksums, repair, scoring, and OCR helpers
-- `mrz/ocr_pipeline.py` - MRZ-specific OCR candidate scoring, repair, and normalization
+- `mrz/` - MRZ-specific packages organized by ICAO document format
+- `mrz/td3/` - TD3 passport MRZ detection, normalization, checksums, repair, scoring, and OCR helpers
+- `mrz/td3/ocr_pipeline.py` - TD3 passport OCR candidate scoring, repair, and normalization
 - `report_utils.py` - report writing and MRZ parsing helpers
 - `run_pipeline.py` - CLI wrapper for local-file execution
 
@@ -153,6 +156,8 @@ OCR_BACKEND=auto .venv/bin/python run_pipeline.py samples/sadia.png
 OCR_BACKEND=tesseract .venv/bin/python run_pipeline.py samples/sadia.png
 ```
 
+Default CLI output is concise: a short `Processing ...` line, the final extracted MRZ, and the reference result. Set `DEBUG=True` to restore verbose stage-by-stage logs. Set `LOG_FORMAT=json` to emit structured result events suitable for log ingestion.
+
 Recommended:
 
 - `OCR_BACKEND=paddle` as the current default and fastest production path on Linux when Paddle is configured correctly
@@ -171,7 +176,7 @@ python -m unittest -q
 
 The `samples/` directory is tracked in git and contains the sample PDFs, PNGs, and MRZ reference data used for regression checks.
 
-- `samples/reference_clean.json` - filename-keyed MRZ reference data for the current clean reference set
+- `samples/reference_td3_clean.json` - TD3 passport reference set with metadata and a `samples` array of `{filename, line1, line2}` objects for the current clean visual-truth benchmark
 
 ## Output
 
@@ -202,8 +207,8 @@ python scripts/check_reference_set_tesseract.py
 - `document_inputs/` - document file loaders for images and PDFs
 - `ocr_backends/` - OCR backend integrations
 - `document_preparation/passport.py` - contour detection and perspective correction
-- `mrz/detect.py` - MRZ band detection and crop
-- `mrz/ocr_pipeline.py` - MRZ-specific OCR scoring and normalization
+- `mrz/td3/detect.py` - TD3 passport MRZ band detection and crop
+- `mrz/td3/ocr_pipeline.py` - TD3 passport MRZ OCR scoring and normalization
 - `requirements.txt` - Python dependencies
 
 ## Notes

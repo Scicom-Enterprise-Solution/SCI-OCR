@@ -8,8 +8,8 @@ import cv2
 import numpy as np
 
 from env_utils import load_env_file
-from mrz.country_codes import is_valid_mrz_country_code
-from mrz.checksums import (
+from mrz.td3.country_codes import is_valid_mrz_country_code
+from mrz.td3.checksums import (
     AMBIGUOUS_FIELD_SUBS,
     DOC_NUMBER_AMBIGUOUS_SUBS,
     char_value,
@@ -18,7 +18,7 @@ from mrz.checksums import (
     validate_and_correct_mrz,
     validate_td3_checks,
 )
-from mrz.normalize import (
+from mrz.td3.normalize import (
     MRZ_LINE_LEN,
     MRZ_WHITELIST,
     _ambiguous_doc_char_count,
@@ -32,7 +32,7 @@ from mrz.normalize import (
     normalize_td3_line1,
     normalize_td3_line2,
 )
-from mrz.ocr_runner import (
+from mrz.td3.ocr_runner import (
     PADDLE_OCR_BACKEND_LABEL,
     apply_candidate_support_bonus as _apply_candidate_support_bonus,
     best_paddle_text_candidate as _best_paddle_text_candidate_impl,
@@ -45,7 +45,7 @@ from mrz.ocr_runner import (
     resolve_paddle_use_gpu as _resolve_paddle_use_gpu_impl,
     trim_line1_spill as _trim_line1_spill_impl,
 )
-from mrz.repair import (
+from mrz.td3.repair import (
     MIN_LINE1_ZONE_REPAIR_GAIN,
     MIN_TOKEN_REPAIR_SCORE_GAIN,
     TOKEN_AMBIGUOUS_SUBS,
@@ -60,7 +60,7 @@ from mrz.repair import (
     repair_paddle_line1_candidate as repair_paddle_line1_candidate_impl,
     repair_td3_line1 as repair_td3_line1_impl,
 )
-from mrz.score import (
+from mrz.td3.score import (
     PAIR_COUNTRY_MATCH_BONUS,
     _max_consonant_run,
     _max_vowel_run,
@@ -70,7 +70,7 @@ from mrz.score import (
     score_td3_line1,
     score_td3_line2,
 )
-from mrz.variants import (
+from mrz.td3.variants import (
     FAST_OCR_SPLIT_LABELS,
     FAST_OCR_VARIANT_SCALES,
     FAST_OCR_VARIANT_SOURCES,
