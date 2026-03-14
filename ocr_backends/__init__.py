@@ -1,1 +1,1 @@
-"""OCR backend modules for MRZ extraction."""
+"""OCR backend modules for OCR engine integrations."""

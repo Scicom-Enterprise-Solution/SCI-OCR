@@ -6,9 +6,13 @@ import pathlib
 import subprocess
 import sys
 
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 def main() -> int:
-    root = pathlib.Path(__file__).resolve().parents[1]
+    root = ROOT
     refs_path = root / "samples" / "reference_clean.json"
 
     with refs_path.open("r", encoding="utf-8") as f:

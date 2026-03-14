@@ -310,7 +310,6 @@ class TestOcrBackendSelection(unittest.TestCase):
             import ocr_mrz
             importlib.reload(ocr_mrz)
 
-
 class TestPaddleOcrAdapter(unittest.TestCase):
     def test_resolve_paddle_use_gpu_returns_true_when_cuda_device_is_visible(self) -> None:
         fake_paddle = mock.Mock()

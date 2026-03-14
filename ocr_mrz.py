@@ -516,6 +516,22 @@ def _resize(img, scale: int):
     return cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
 
+def _resize_to_height(img, target_height: int):
+    h, w = img.shape[:2]
+    if h <= 0 or w <= 0 or h == target_height:
+        return img.copy()
+    target_width = max(1, int(round(w * (target_height / float(h)))))
+    return cv2.resize(img, (target_width, target_height), interpolation=cv2.INTER_CUBIC)
+
+
+def _cap_width(img, max_width: int):
+    h, w = img.shape[:2]
+    if w <= max_width or h <= 0 or w <= 0:
+        return img.copy()
+    target_height = max(1, int(round(h * (max_width / float(w)))))
+    return cv2.resize(img, (max_width, target_height), interpolation=cv2.INTER_AREA)
+
+
 def _ocr_search_profile() -> dict:
     if FAST_OCR:
         return {
@@ -813,9 +829,9 @@ def _paddle_ocr_image(img, line_kind: str | None = None) -> str:
 
 def generate_ocr_candidates(line_img, prefix: str):
     gray = _to_gray(line_img)
-    variants = _prepare_variants(gray, prefix)
     backends = _resolve_ocr_backends()
     line_kind = "line1" if prefix.startswith("line1_") else "line2" if prefix.startswith("line2_") else None
+    variants = _prepare_variants(gray, prefix)
 
     candidates = []
     seen = set()
