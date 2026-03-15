@@ -19,7 +19,15 @@ Do not expand scope to TD1, TD2, visas, residence permits, or other MRTD formats
 - Treat the user's WSL terminal as the source of truth for PaddleOCR and GPU-enabled runs.
 - The Codex sandbox may not have visibility into the host GPU or the same Paddle runtime state as WSL, so sandbox-side Paddle/GPU results are not authoritative.
 - Sandbox verification should focus on unit tests, static code checks, and non-GPU local validation unless the user explicitly asks otherwise.
-- After OCR runs, inspect the generated per-sample report files under `output/<sample-name>/` as part of debugging. These reports contain deeper result details than the terminal summary and should be used for mismatch analysis.
+- The repo now includes a FastAPI + SQLite API layer under `api/` and `db/`. Treat this as real repo architecture, not temporary scaffolding.
+- The API is intended to behave like a long-lived production process. Warm-process behavior is more representative than one-process-per-file CLI timing.
+- Runtime storage belongs under `storage/` and must stay git-ignored.
+- API report files belong under `storage/reports/`.
+- CLI reference/regression combined reports belong under `samples/reports/`.
+- Per-sample pipeline reports still belong under `output/<sample>/`.
+- After OCR failures, inspect the generated per-sample report files under `output/<sample>/`. These contain deeper details than the terminal summary and should drive mismatch analysis.
+- Prefer repo-relative serialized paths over absolute paths in reports, DB records, and API responses. Internal absolute resolution is fine only at the point of file access.
+- Keep cross-platform portability in mind. Stored path strings should remain portable across Linux, WSL, and Windows.
 
 ---
 
@@ -258,6 +266,12 @@ Preferred evaluation mindset:
 - structural TD3 correctness
 - no silent corruption of visible truth
 
+Additional repo-specific evaluation rules:
+- For benchmark/reference runs, prefer the in-process warm runners in `scripts/check_reference_set_*.py` over subprocess-per-file timing.
+- When reviewing performance, separate cold-start cost from steady-state cost.
+- `TOTAL_RAW` includes warm-up; `TOTAL` and averages in the combined CLI report are the steady-state numbers.
+- If a failure occurs in a reference run, inspect the relevant per-sample `output/<sample>/..._report.json` before proposing fixes.
+
 ---
 
 ## Recent performance findings
@@ -269,12 +283,15 @@ Observed findings from recent Paddle investigation:
 - `document_preparation`, MRZ detection, variant-preparation, and final ranking are all comparatively small.
 - The main wall-clock cost sits in `mrz.ocr.timing_ms.candidate_ocr_ms`.
 - Paddle GPU is available and resolves to `gpu:0`, but utilization is bursty because the runtime is doing multiple small batched inference calls rather than one dense sustained job.
-- Current Paddle telemetry shows batching is working. Typical balanced-profile files use multiple batched `predict()` calls and do not fall back to serial.
+- Current Paddle telemetry shows batching is working and does not normally fall back to serial.
 - Reducing image-save/debug I/O in normal mode did **not** materially change runtime.
 - CPU-side preprocessing parallelism helped only marginally; it is not the main remaining bottleneck.
+- The earlier apparent 25s-40s per-sample cost from regression runs was heavily distorted by cold-start behavior from spawning one Python process per sample.
+- After switching the regression runner to a single warm in-process run, steady-state Paddle timing dropped to roughly single-digit seconds per sample, which is much closer to API behavior.
+- Warm-process benchmarking is therefore the correct baseline for operational performance discussions.
 
 Current proven-safe speed baseline:
-- `PADDLE_PROFILE=balanced`
+- `PADDLE_PROFILE=exhaustive`
 - `PADDLE_FAST=False`
 - `MRZ_VARIANT_WORKERS=4`
 
@@ -282,12 +299,43 @@ What was learned from experiments:
 - A very aggressive Paddle fast profile reduced runtime but caused benchmark regressions and should not be the default without explicit tradeoff acceptance.
 - Pruning line-1 split evaluation based only on line-2 split quality caused a real regression (`inam_new.png`) and should be treated as unsafe unless redesigned more carefully.
 - Narrow line-1 scoring penalties for obvious garbage tails can be safe when backed by report evidence and targeted tests.
+- Warm API extraction latency can be far lower than the old subprocess benchmark suggested, and API timing should not be confused with reference-backed output reuse.
 
 Guidance for future speed work:
 - For single-file latency, the main lever is reducing **redundant OCR candidate evaluation** without losing the candidate that carries the correct line 1.
 - Prefer conservative, report-backed changes over broad search-space cuts.
 - When a new optimization changes candidate flow, rerun the full Paddle reference set and inspect failed sample reports before keeping it.
 - Always inspect `mrz.ocr.backend_stats.paddle` and timing fields in the report before drawing conclusions about GPU behavior.
+- Do not use cold-start subprocess benchmark timing as the main argument for changing search profiles.
+
+---
+
+## API And Storage Notes
+
+Current API shape:
+- `POST /api/uploads`
+- `POST /api/extractions`
+- `GET /api/references`
+- `POST /api/references`
+- `GET /api/health`
+
+Current API behavior:
+- Uploads are deduplicated by SHA-256 hash.
+- `document_id` is the primary handle for later extraction.
+- Extraction only requires `document_id`; `crop`, `rotation`, and `use_face_hint` are optional.
+- `use_face_hint` should default to `False` unless explicitly requested.
+- API extraction should suppress internal Stage 1/2/3 debug spam when `DEBUG=False`.
+
+Path/report conventions:
+- API reports: `storage/reports/<document_id>_<ddMMyyHHmmss>.json`
+- CLI combined run reports: `samples/reports/<ddMMyyHHmmss>_<backend>.json`
+- Avoid absolute paths in serialized output.
+
+Architecture guidance:
+- Keep API concerns in `api/`.
+- Keep persistence concerns in `db/`.
+- Do not entangle API/controller code with MRZ core logic more than necessary.
+- Prefer service-layer calls into the existing pipeline rather than duplicating OCR logic inside routes.
 
 ---
 
