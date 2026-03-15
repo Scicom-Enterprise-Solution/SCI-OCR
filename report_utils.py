@@ -1,6 +1,7 @@
 import json
 import os
 from datetime import datetime, timezone
+from path_utils import to_repo_relative
 
 
 def _clean_mrz_name(value: str) -> str:
@@ -126,4 +127,4 @@ def write_pipeline_report(output_dir: str, report_data: dict, filename: str = "r
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
-    return out_path
+    return to_repo_relative(out_path)

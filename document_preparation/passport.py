@@ -10,6 +10,7 @@ import numpy as np
 from env_utils import load_env_file
 from document_inputs.pdf_input import render_pdf_page
 from logger_utils import is_debug_enabled
+from path_utils import to_repo_relative
 
 
 load_env_file()
@@ -351,7 +352,7 @@ def main() -> None:
     aligned = perspective_correction(img_bgr, quad_pts)
     save(aligned, "aligned_passport.png")
 
-    print("\n[Pipeline] Done. All outputs written to:", os.path.abspath(OUTPUT_DIR))
+    print("\n[Pipeline] Done. All outputs written to:", to_repo_relative(OUTPUT_DIR))
 
 
 if __name__ == "__main__":

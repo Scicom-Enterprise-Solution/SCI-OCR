@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 from env_utils import load_env_file
 from logger_utils import is_debug_enabled
+from path_utils import to_repo_relative
 
 
 load_env_file()
@@ -548,7 +549,7 @@ def main() -> None:
     save(debug_img, "mrz_detected.png")
 
     print(f"\n[Pipeline] Done. MRZ region saved to: "
-          f"{os.path.abspath(os.path.join(OUTPUT_DIR, 'mrz_region.png'))}")
+          f"{to_repo_relative(os.path.join(OUTPUT_DIR, 'mrz_region.png'))}")
 
 
 if __name__ == "__main__":

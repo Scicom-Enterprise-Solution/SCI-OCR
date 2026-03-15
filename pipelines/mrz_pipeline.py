@@ -8,6 +8,7 @@ from document_inputs import DocumentInputError, SUPPORTED_IMAGE_EXTS, load_docum
 from face_detection import orient_with_face_hint, extract_face_crop, draw_face_box
 from logger_utils import print_reference_summary
 from mrz.td3.rotation import detect_mrz_with_rotation_fallback
+from path_utils import to_repo_relative
 from report_utils import parse_mrz_td3, write_pipeline_report
 from samples.reference_utils import normalize_reference_samples
 
@@ -29,7 +30,7 @@ def build_reference_comparison(filename: str, line1: str, line2: str) -> dict:
 
     comparison = {
         "reference_available": False,
-        "reference_file": os.path.abspath(reference_path),
+        "reference_file": to_repo_relative(reference_path),
         "filename": filename,
     }
 
@@ -131,13 +132,13 @@ def process_document(
     report = {
         "status": "started",
         "input": {
-            "path": os.path.abspath(input_path) if input_path else None,
+            "path": to_repo_relative(input_path) if input_path else None,
             "filename": loaded_input.filename,
             "source_type": loaded_input.source_type,
             "ext": loaded_input.extension,
             "sample_name": output_prefix,
         },
-        "output_dir": os.path.abspath(output_dir),
+        "output_dir": to_repo_relative(output_dir),
         "face": {
             "detected": False,
             "orientation_hint": None,
@@ -365,7 +366,7 @@ def process_document(
     log("PIPELINE COMPLETE")
     log("=" * 60)
 
-    out = os.path.abspath(stage1.OUTPUT_DIR)
+    out = to_repo_relative(stage1.OUTPUT_DIR)
     log(f"  aligned passport : {out}\\aligned_passport.png")
     log(f"  MRZ region       : {out}\\mrz_region.png")
     log(f"  MRZ annotated    : {out}\\mrz_detected.png")
