@@ -25,23 +25,13 @@ def detect_mrz_with_rotation_fallback(aligned_bgr, output_prefix: str | None = N
         working = aligned_bgr if rotate_code is None else cv2.rotate(aligned_bgr, rotate_code)
 
         img_h, img_w = working.shape[:2]
-        img_gray = cv2.cvtColor(working, cv2.COLOR_BGR2GRAY)
         print(f"[Stage 2] Trying orientation: {label} ({img_w}x{img_h})")
-
-        roi_top = int(img_h * stage2.ROI_TOP_FRACTION)
-        roi = img_gray[roi_top:, :]
-
-        blackhat = stage2.apply_blackhat(roi)
-        gradient = stage2.compute_gradient(blackhat)
-        thresh = stage2.threshold_image(gradient)
-        closed = stage2.close_and_dilate(thresh)
-
-        mrz_lines, _ = stage2.find_mrz_contours(closed, img_h, img_w, roi_y_offset=roi_top)
+        mrz_lines, detection_meta = stage2.detect_mrz_lines(working)
         if mrz_lines:
-            stage2.save(blackhat, _with_prefix("mrz_blackhat.png", output_prefix))
-            stage2.save(gradient, _with_prefix("mrz_gradient.png", output_prefix))
-            stage2.save(thresh, _with_prefix("mrz_threshold.png", output_prefix))
-            stage2.save(closed, _with_prefix("mrz_closed.png", output_prefix))
+            stage2.save(detection_meta["images"]["blackhat"], _with_prefix("mrz_blackhat.png", output_prefix))
+            stage2.save(detection_meta["images"]["gradient"], _with_prefix("mrz_gradient.png", output_prefix))
+            stage2.save(detection_meta["images"]["thresh"], _with_prefix("mrz_threshold.png", output_prefix))
+            stage2.save(detection_meta["images"]["closed"], _with_prefix("mrz_closed.png", output_prefix))
             return working, mrz_lines, stage2.merge_bboxes(mrz_lines), label
 
     return None

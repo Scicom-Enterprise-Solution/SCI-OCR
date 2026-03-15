@@ -30,6 +30,7 @@ from mrz.td3.ocr_pipeline import (
     validate_and_correct_mrz,
     validate_td3_checks,
 )
+from mrz.td3.detect import prepare_detection_roi, scale_bboxes_back
 from ocr_backends.paddle_backend import get_paddle_ocr_stats, paddle_ocr_images, reset_paddle_ocr_stats
 
 
@@ -261,6 +262,43 @@ class TestLine2Checks(unittest.TestCase):
 
         self.assertEqual(repaired[13:19], "001208")
         self.assertEqual(checks["passed_count"], 5)
+
+
+class TestStage2DetectionScaling(unittest.TestCase):
+    def test_prepare_detection_roi_upscales_small_inputs(self) -> None:
+        gray = np.zeros((350, 512), dtype=np.uint8)
+
+        roi, roi_top, upscale = prepare_detection_roi(gray)
+
+        self.assertEqual(roi_top, int(350 * 0.65))
+        self.assertGreater(upscale, 1.0)
+        self.assertAlmostEqual(upscale, 216 / (350 - int(350 * 0.65)), places=2)
+        self.assertEqual(roi.shape[1], int(round(512 * upscale)))
+
+    def test_prepare_detection_roi_does_not_upscale_medium_image_with_tall_roi(self) -> None:
+        gray = np.zeros((921, 687), dtype=np.uint8)
+
+        roi, roi_top, upscale = prepare_detection_roi(gray)
+
+        self.assertEqual(roi_top, int(921 * 0.65))
+        self.assertEqual(upscale, 1.0)
+        self.assertEqual(roi.shape[1], 687)
+
+    def test_prepare_detection_roi_does_not_upscale_medium_width_even_if_roi_is_short(self) -> None:
+        gray = np.zeros((500, 687), dtype=np.uint8)
+
+        roi, _, upscale = prepare_detection_roi(gray)
+
+        self.assertEqual(upscale, 1.0)
+        self.assertEqual(roi.shape[1], 687)
+
+    def test_scale_bboxes_back_maps_detection_boxes_to_original_size(self) -> None:
+        bboxes = [(77, 480, 479, 101)]
+
+        scaled = scale_bboxes_back(bboxes, 1.76)
+
+        self.assertEqual(scaled[0][0], 44)
+        self.assertEqual(scaled[0][1], 273)
 
     def test_validate_and_correct_mrz_repairs_document_number_q_to_o_when_checksum_matches(self) -> None:
         _, repaired, checks = validate_and_correct_mrz(

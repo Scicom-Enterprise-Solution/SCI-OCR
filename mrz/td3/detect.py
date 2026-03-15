@@ -61,6 +61,12 @@ CROP_PAD_X = 10
 CROP_PAD_Y = 15   # generous vertical padding to capture full character height
 ESSENTIAL_OUTPUTS = {"mrz_region.png", "mrz_detected.png"}
 
+# Scale-aware detection: very short ROIs need to be enlarged before the fixed
+# morphology kernels become effective on the MRZ line structure.
+DETECTION_MIN_ROI_HEIGHT = 216
+DETECTION_MAX_SMALL_IMAGE_WIDTH = 600
+DETECTION_MAX_UPSCALE = 2.5
+
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -73,6 +79,86 @@ def save(img: np.ndarray, filename: str) -> None:
     path = os.path.join(OUTPUT_DIR, filename)
     cv2.imwrite(path, img)
     print(f"[Save]  {path}")
+
+
+def prepare_detection_roi(gray: np.ndarray) -> tuple[np.ndarray, int, float]:
+    """
+    Build the bottom-of-page ROI used for MRZ detection and upscale it when the
+    source image is small enough that fixed morphology kernels would otherwise
+    overrun the text structure.
+    """
+    img_h, img_w = gray.shape[:2]
+    roi_top = int(img_h * ROI_TOP_FRACTION)
+    roi = gray[roi_top:, :]
+    roi_h = max(1, roi.shape[0])
+
+    upscale = 1.0
+    if img_w <= DETECTION_MAX_SMALL_IMAGE_WIDTH and roi_h < DETECTION_MIN_ROI_HEIGHT:
+        upscale = max(upscale, DETECTION_MIN_ROI_HEIGHT / float(roi_h))
+    upscale = min(DETECTION_MAX_UPSCALE, upscale)
+
+    if upscale > 1.0:
+        scaled_w = max(1, int(round(img_w * upscale)))
+        scaled_h = max(1, int(round(roi_h * upscale)))
+        roi = cv2.resize(roi, (scaled_w, scaled_h), interpolation=cv2.INTER_CUBIC)
+        print(f"[Step 1] Detection ROI upscaled x{upscale:.2f} -> {scaled_w}x{scaled_h} px")
+
+    return roi, roi_top, upscale
+
+
+def scale_bboxes_back(
+    bboxes: list[tuple[int, int, int, int]],
+    upscale: float,
+) -> list[tuple[int, int, int, int]]:
+    """Map detection-space boxes back to original image coordinates."""
+    if upscale <= 1.0:
+        return bboxes
+
+    scaled = []
+    for x, y, w, h in bboxes:
+        scaled.append((
+            int(round(x / upscale)),
+            int(round(y / upscale)),
+            max(1, int(round(w / upscale))),
+            max(1, int(round(h / upscale))),
+        ))
+    return scaled
+
+
+def detect_mrz_lines(
+    img_bgr: np.ndarray,
+) -> tuple[list[tuple[int, int, int, int]], dict[str, np.ndarray]]:
+    """
+    Run the Stage 2 MRZ detection pipeline on an image and return line boxes in
+    original-image coordinates plus intermediate debug images.
+    """
+    img_h, img_w = img_bgr.shape[:2]
+    img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    roi, roi_top, upscale = prepare_detection_roi(img_gray)
+
+    blackhat = apply_blackhat(roi)
+    gradient = compute_gradient(blackhat)
+    thresh = threshold_image(gradient)
+    closed = close_and_dilate(thresh)
+
+    detect_img_h = int(round(img_h * upscale))
+    detect_img_w = int(round(img_w * upscale))
+    detect_roi_top = int(round(roi_top * upscale))
+    mrz_lines, debug_records = find_mrz_contours(
+        closed,
+        detect_img_h,
+        detect_img_w,
+        roi_y_offset=detect_roi_top,
+    )
+    mrz_lines = scale_bboxes_back(mrz_lines, upscale)
+
+    debug_images = {
+        "blackhat": blackhat,
+        "gradient": gradient,
+        "thresh": thresh,
+        "closed": closed,
+    }
+    return mrz_lines, {"images": debug_images, "debug_records": debug_records, "upscale": upscale}
 
 
 # ---------------------------------------------------------------------------
@@ -410,36 +496,31 @@ def main() -> None:
     # Working on the full page exposes the pipeline to portrait text and
     # biographical fields that create spurious wide contours.
     roi_top = int(img_h * ROI_TOP_FRACTION)
-    roi = img_gray[roi_top:, :]
     print(f"[Step 1] ROI: bottom {100*(1-ROI_TOP_FRACTION):.0f}% of image  "
             f"(rows {roi_top}-{img_h},  {img_w}x{img_h - roi_top} px)")
     # Step 2 — Blackhat morphology (on ROI)
     # ------------------------------------------------------------------
-    blackhat = apply_blackhat(roi)
+    mrz_lines, detection_meta = detect_mrz_lines(img_bgr)
+    blackhat = detection_meta["images"]["blackhat"]
     save(blackhat, "mrz_blackhat.png")
 
     # ------------------------------------------------------------------
     # Step 3 — Horizontal gradient
     # ------------------------------------------------------------------
-    gradient = compute_gradient(blackhat)
+    gradient = detection_meta["images"]["gradient"]
     save(gradient, "mrz_gradient.png")
 
     # ------------------------------------------------------------------
     # Step 4 — Threshold
     # ------------------------------------------------------------------
-    thresh = threshold_image(gradient)
+    thresh = detection_meta["images"]["thresh"]
     save(thresh, "mrz_threshold.png")
 
     # ------------------------------------------------------------------
     # Step 5 — Morphological closing + dilation
     # ------------------------------------------------------------------
-    closed = close_and_dilate(thresh)
+    closed = detection_meta["images"]["closed"]
     save(closed, "mrz_closed.png")
-
-    # ------------------------------------------------------------------
-    # Step 6 — Contour detection and filtering
-    # ------------------------------------------------------------------
-    mrz_lines, _ = find_mrz_contours(closed, img_h, img_w, roi_y_offset=roi_top)
 
     if not mrz_lines:
         print("\n[Pipeline] Aborting: MRZ region not detected.")
