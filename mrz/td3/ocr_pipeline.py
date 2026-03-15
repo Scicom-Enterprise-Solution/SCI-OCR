@@ -45,6 +45,7 @@ from mrz.td3.ocr_runner import (
     line1_selection_penalty as _line1_selection_penalty,
     ocr_image as _ocr_image_impl,
     paddle_ocr_image as _paddle_ocr_image_impl,
+    paddle_ocr_images as _paddle_ocr_images_impl,
     reset_paddle_ocr_stats as _reset_paddle_ocr_stats_impl,
     resolve_ocr_backends as _resolve_ocr_backends_impl,
     resolve_paddle_use_gpu as _resolve_paddle_use_gpu_impl,
@@ -293,6 +294,94 @@ def _should_early_accept_paddle_split(split_info: dict, line1_ranked: list[dict]
     )
 
 
+def _auto_requires_tesseract(line1_candidates: list[dict], line2_candidates: list[dict]) -> bool:
+    if OCR_BACKEND != "auto":
+        return False
+    if not line1_candidates or not line2_candidates:
+        return True
+
+    line1_ranked = _rank_candidates(list(line1_candidates), "score")
+    line2_ranked = _rank_candidates(list(line2_candidates), "score")
+    best_line1 = line1_ranked[0]
+    best_line2 = line2_ranked[0]
+    checks = best_line2.get("checks", {})
+
+    return not (
+        best_line1.get("score", 0.0) >= 105.0
+        and best_line2.get("score", 0.0) >= 150.0
+        and checks.get("passed_count", 0) == 5
+        and checks.get("composite_valid", False)
+    )
+
+
+def _run_auto_paddle_batches(prepared_splits: list[dict]) -> list[dict]:
+    split_results = [{"line1": [], "line2": []} for _ in prepared_splits]
+    line1_jobs: list[tuple[int, dict]] = []
+    line1_images: list[np.ndarray] = []
+    line2_jobs: list[tuple[int, dict]] = []
+    line2_images: list[np.ndarray] = []
+
+    for split_index, prepared in enumerate(prepared_splits):
+        for variant in prepared["line1_variants"]:
+            line1_jobs.append((split_index, variant))
+            line1_images.append(variant["image"])
+        for variant in prepared["line2_variants"]:
+            line2_jobs.append((split_index, variant))
+            line2_images.append(variant["image"])
+
+    if line1_images:
+        line1_texts = _paddle_ocr_images_impl(
+            line1_images,
+            line_kind="line1",
+            paddle_lang=PADDLEOCR_LANG,
+            paddle_use_gpu=PADDLEOCR_USE_GPU,
+            normalize_mrz=normalize_mrz,
+            normalize_td3_line1=normalize_td3_line1,
+            normalize_td3_line2=normalize_td3_line2,
+            score_td3_line1=score_td3_line1,
+            score_td3_line2=score_td3_line2,
+        )
+        for (split_index, variant), text in zip(line1_jobs, line1_texts):
+            if not text:
+                continue
+            split_results[split_index]["line1"].append({
+                "backend": "paddle",
+                "text_raw": text,
+                "text": normalize_mrz(text),
+                "variant_id": variant["variant_id"],
+                "variant_meta": variant["meta"],
+                "psm": PADDLE_OCR_BACKEND_LABEL,
+                "image": variant["image"],
+            })
+
+    if line2_images:
+        line2_texts = _paddle_ocr_images_impl(
+            line2_images,
+            line_kind="line2",
+            paddle_lang=PADDLEOCR_LANG,
+            paddle_use_gpu=PADDLEOCR_USE_GPU,
+            normalize_mrz=normalize_mrz,
+            normalize_td3_line1=normalize_td3_line1,
+            normalize_td3_line2=normalize_td3_line2,
+            score_td3_line1=score_td3_line1,
+            score_td3_line2=score_td3_line2,
+        )
+        for (split_index, variant), text in zip(line2_jobs, line2_texts):
+            if not text:
+                continue
+            split_results[split_index]["line2"].append({
+                "backend": "paddle",
+                "text_raw": text,
+                "text": normalize_mrz(text),
+                "variant_id": variant["variant_id"],
+                "variant_meta": variant["meta"],
+                "psm": PADDLE_OCR_BACKEND_LABEL,
+                "image": variant["image"],
+            })
+
+    return split_results
+
+
 # -------------------------------------------------------
 # OCR
 # -------------------------------------------------------
@@ -526,6 +615,10 @@ def run_ocr(mrz_img):
     all_line1_candidates = []
     all_line2_candidates = []
     split_summaries = []
+    auto_stats = {
+        "paddle_only_splits": 0,
+        "tesseract_fallback_splits": 0,
+    }
     candidate_generation_started_at = time.perf_counter()
     variant_preparation_started_at = time.perf_counter()
 
@@ -550,80 +643,150 @@ def run_ocr(mrz_img):
 
     variant_preparation_ms = round((time.perf_counter() - variant_preparation_started_at) * 1000.0, 2)
     ocr_candidate_eval_started_at = time.perf_counter()
+    auto_paddle_candidates = _run_auto_paddle_batches(prepared_splits) if OCR_BACKEND == "auto" else None
 
-    for prepared in prepared_splits:
+    for split_index, prepared in enumerate(prepared_splits):
         split_info = prepared["split_info"]
         line1_img = prepared["line1_img"]
         line2_img = prepared["line2_img"]
-        line1_candidates = generate_ocr_candidates_impl(
-            line1_img,
-            f"line1_{split_info['label']}",
-            to_gray=_to_gray,
-            prepare_variants=_prepare_variants,
-            ocr_backend=OCR_BACKEND,
-            ocr_configs=OCR_CONFIGS,
-            tesseract_lang=TESSERACT_LANG,
-            mrz_whitelist=MRZ_WHITELIST,
-            paddle_lang=PADDLEOCR_LANG,
-            paddle_use_gpu=PADDLEOCR_USE_GPU,
-            normalize_mrz=normalize_mrz,
-            normalize_td3_line1=normalize_td3_line1,
-            normalize_td3_line2=normalize_td3_line2,
-            score_td3_line1=score_td3_line1,
-            score_td3_line2=score_td3_line2,
-            variants=prepared["line1_variants"],
-        )
-        line2_candidates = generate_ocr_candidates_impl(
-            line2_img,
-            f"line2_{split_info['label']}",
-            to_gray=_to_gray,
-            prepare_variants=_prepare_variants,
-            ocr_backend=OCR_BACKEND,
-            ocr_configs=OCR_CONFIGS,
-            tesseract_lang=TESSERACT_LANG,
-            mrz_whitelist=MRZ_WHITELIST,
-            paddle_lang=PADDLEOCR_LANG,
-            paddle_use_gpu=PADDLEOCR_USE_GPU,
-            normalize_mrz=normalize_mrz,
-            normalize_td3_line1=normalize_td3_line1,
-            normalize_td3_line2=normalize_td3_line2,
-            score_td3_line1=score_td3_line1,
-            score_td3_line2=score_td3_line2,
-            variants=prepared["line2_variants"],
-        )
+        if OCR_BACKEND == "auto":
+            line1_candidates = list(auto_paddle_candidates[split_index]["line1"])
+            line2_candidates = list(auto_paddle_candidates[split_index]["line2"])
+        else:
+            line1_candidates = generate_ocr_candidates_impl(
+                line1_img,
+                f"line1_{split_info['label']}",
+                to_gray=_to_gray,
+                prepare_variants=_prepare_variants,
+                ocr_backend=OCR_BACKEND,
+                ocr_configs=OCR_CONFIGS,
+                tesseract_lang=TESSERACT_LANG,
+                mrz_whitelist=MRZ_WHITELIST,
+                paddle_lang=PADDLEOCR_LANG,
+                paddle_use_gpu=PADDLEOCR_USE_GPU,
+                normalize_mrz=normalize_mrz,
+                normalize_td3_line1=normalize_td3_line1,
+                normalize_td3_line2=normalize_td3_line2,
+                score_td3_line1=score_td3_line1,
+                score_td3_line2=score_td3_line2,
+                variants=prepared["line1_variants"],
+            )
+            line2_candidates = generate_ocr_candidates_impl(
+                line2_img,
+                f"line2_{split_info['label']}",
+                to_gray=_to_gray,
+                prepare_variants=_prepare_variants,
+                ocr_backend=OCR_BACKEND,
+                ocr_configs=OCR_CONFIGS,
+                tesseract_lang=TESSERACT_LANG,
+                mrz_whitelist=MRZ_WHITELIST,
+                paddle_lang=PADDLEOCR_LANG,
+                paddle_use_gpu=PADDLEOCR_USE_GPU,
+                normalize_mrz=normalize_mrz,
+                normalize_td3_line1=normalize_td3_line1,
+                normalize_td3_line2=normalize_td3_line2,
+                score_td3_line1=score_td3_line1,
+                score_td3_line2=score_td3_line2,
+                variants=prepared["line2_variants"],
+            )
+
+        def _prepare_line1_candidates(candidates: list[dict]) -> list[dict]:
+            prepared_candidates = []
+            for cand in candidates:
+                normalized_raw = normalize_td3_line1(cand["text"])
+                text = _trim_line1_spill(cand["text"])
+                spill_trimmed = text != normalized_raw
+                repaired, repairs = repair_td3_line1(text)
+                if cand.get("backend") == "paddle":
+                    paddle_repaired, paddle_meta = _repair_paddle_line1_candidate(repaired)
+                    if paddle_meta is not None:
+                        repaired = paddle_repaired
+                        repairs = repairs + [paddle_meta]
+                cand["text"] = _trim_line1_spill(repaired)
+                cand["repairs"] = repairs
+                cand["spill_trimmed"] = spill_trimmed
+                cand["selection_penalty"] = 0.0
+                base_score = score_td3_line1(cand["text"])
+                selection_penalty = _line1_selection_penalty(cand)
+                cand["selection_penalty"] = selection_penalty
+                cand["score"] = base_score - selection_penalty
+                cand["checksum_pass_count"] = None
+                cand["split_label"] = split_info["label"]
+                cand["split_y"] = split_info["split_y"]
+                prepared_candidates.append(cand)
+            return prepared_candidates
+
+        def _prepare_line2_candidates(candidates: list[dict]) -> list[dict]:
+            prepared_candidates = []
+            for cand in candidates:
+                text = normalize_td3_line2(cand["text"])
+                _, repaired, checks = validate_and_correct_mrz("", text)
+                cand["text"] = repaired
+                cand["checks"] = checks
+                cand["score"] = score_td3_line2(repaired)[0]
+                cand["checksum_pass_count"] = checks["passed_count"]
+                cand["split_label"] = split_info["label"]
+                cand["split_y"] = split_info["split_y"]
+                prepared_candidates.append(cand)
+            return prepared_candidates
+
+        line1_candidates = _prepare_line1_candidates(line1_candidates)
+        line2_candidates = _prepare_line2_candidates(line2_candidates)
+
+        if OCR_BACKEND == "auto":
+            if _auto_requires_tesseract(line1_candidates, line2_candidates):
+                auto_stats["tesseract_fallback_splits"] += 1
+                line1_candidates.extend(
+                    _prepare_line1_candidates(
+                        generate_ocr_candidates_impl(
+                            line1_img,
+                            f"line1_{split_info['label']}",
+                            to_gray=_to_gray,
+                            prepare_variants=_prepare_variants,
+                            ocr_backend="tesseract",
+                            ocr_configs=OCR_CONFIGS,
+                            tesseract_lang=TESSERACT_LANG,
+                            mrz_whitelist=MRZ_WHITELIST,
+                            paddle_lang=PADDLEOCR_LANG,
+                            paddle_use_gpu=PADDLEOCR_USE_GPU,
+                            normalize_mrz=normalize_mrz,
+                            normalize_td3_line1=normalize_td3_line1,
+                            normalize_td3_line2=normalize_td3_line2,
+                            score_td3_line1=score_td3_line1,
+                            score_td3_line2=score_td3_line2,
+                            variants=prepared["line1_variants"],
+                        )
+                    )
+                )
+                line2_candidates.extend(
+                    _prepare_line2_candidates(
+                        generate_ocr_candidates_impl(
+                            line2_img,
+                            f"line2_{split_info['label']}",
+                            to_gray=_to_gray,
+                            prepare_variants=_prepare_variants,
+                            ocr_backend="tesseract",
+                            ocr_configs=OCR_CONFIGS,
+                            tesseract_lang=TESSERACT_LANG,
+                            mrz_whitelist=MRZ_WHITELIST,
+                            paddle_lang=PADDLEOCR_LANG,
+                            paddle_use_gpu=PADDLEOCR_USE_GPU,
+                            normalize_mrz=normalize_mrz,
+                            normalize_td3_line1=normalize_td3_line1,
+                            normalize_td3_line2=normalize_td3_line2,
+                            score_td3_line1=score_td3_line1,
+                            score_td3_line2=score_td3_line2,
+                            variants=prepared["line2_variants"],
+                        )
+                    )
+                )
+            else:
+                auto_stats["paddle_only_splits"] += 1
 
         for cand in line1_candidates:
-            normalized_raw = normalize_td3_line1(cand["text"])
-            text = _trim_line1_spill(cand["text"])
-            spill_trimmed = text != normalized_raw
-            repaired, repairs = repair_td3_line1(text)
-            if cand.get("backend") == "paddle":
-                paddle_repaired, paddle_meta = _repair_paddle_line1_candidate(repaired)
-                if paddle_meta is not None:
-                    repaired = paddle_repaired
-                    repairs = repairs + [paddle_meta]
-            cand["text"] = _trim_line1_spill(repaired)
-            cand["repairs"] = repairs
-            cand["spill_trimmed"] = spill_trimmed
-            cand["selection_penalty"] = 0.0
-            base_score = score_td3_line1(cand["text"])
-            selection_penalty = _line1_selection_penalty(cand)
-            cand["selection_penalty"] = selection_penalty
-            cand["score"] = base_score - selection_penalty
-            cand["checksum_pass_count"] = None
-            cand["split_label"] = split_info["label"]
-            cand["split_y"] = split_info["split_y"]
             all_line1_candidates.append(cand)
 
         for cand in line2_candidates:
-            text = normalize_td3_line2(cand["text"])
-            _, repaired, checks = validate_and_correct_mrz("", text)
-            cand["text"] = repaired
-            cand["checks"] = checks
-            cand["score"] = score_td3_line2(repaired)[0]
-            cand["checksum_pass_count"] = checks["passed_count"]
-            cand["split_label"] = split_info["label"]
-            cand["split_y"] = split_info["split_y"]
             all_line2_candidates.append(cand)
 
         if not line1_candidates or not line2_candidates:
@@ -811,6 +974,7 @@ def run_ocr(mrz_img):
         "backend_stats": {
             "backend": OCR_BACKEND,
             "paddle": _get_paddle_ocr_stats() if OCR_BACKEND in {"paddle", "auto", "hybrid", "both"} else None,
+            "auto": auto_stats if OCR_BACKEND == "auto" else None,
         },
         "timing_ms": {
             "total_ocr_ms": round((time.perf_counter() - ocr_started_at) * 1000.0, 2),

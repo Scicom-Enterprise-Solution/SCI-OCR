@@ -6,6 +6,7 @@ import numpy as np
 from unittest import mock
 
 from mrz.td3.ocr_pipeline import (
+    _auto_requires_tesseract,
     _apply_candidate_support_bonus,
     _best_paddle_text_candidate,
     _line1_selection_penalty,
@@ -15,6 +16,7 @@ from mrz.td3.ocr_pipeline import (
     _repair_paddle_line1_candidate,
     _resolve_ocr_backends,
     _resolve_paddle_use_gpu,
+    _run_auto_paddle_batches,
     _trim_line1_spill,
     build_split_candidates,
     estimate_ocr_search_space,
@@ -207,6 +209,66 @@ class TestLine1Repair(unittest.TestCase):
         noisy = score_td3_line1("P<BGDALAM<<SHAHADAT<<<<CCC<<<CCCCC<KCAK<<<<<")
 
         self.assertGreater(clean, noisy)
+
+    def test_auto_skips_tesseract_when_paddle_split_is_strong(self) -> None:
+        with mock.patch("mrz.td3.ocr_pipeline.OCR_BACKEND", "auto"):
+            line1_candidates = [{
+                "text": "P<BGDRAHMAN<<MD<MAHBUBUR<<<<<<<<<<<<<<<<<<<<",
+                "score": 108.0,
+            }]
+            line2_candidates = [{
+                "text": "A132435974BGD0207278M33112041030761520<<<<18",
+                "score": 151.0,
+                "checks": {
+                    "passed_count": 5,
+                    "composite_valid": True,
+                },
+            }]
+
+            self.assertFalse(_auto_requires_tesseract(line1_candidates, line2_candidates))
+
+    def test_auto_uses_tesseract_when_paddle_line2_checks_are_weak(self) -> None:
+        with mock.patch("mrz.td3.ocr_pipeline.OCR_BACKEND", "auto"):
+            line1_candidates = [{
+                "text": "P<BGDRAHMAN<<MD<MAHBUBUR<<<<<<<<<<<<<<<<<<<<",
+                "score": 108.0,
+            }]
+            line2_candidates = [{
+                "text": "A132435974BGD0207278M33112041030761520<<<<18",
+                "score": 145.0,
+                "checks": {
+                    "passed_count": 4,
+                    "composite_valid": False,
+                },
+            }]
+
+            self.assertTrue(_auto_requires_tesseract(line1_candidates, line2_candidates))
+
+    def test_auto_batches_all_paddle_line_variants_by_line_kind(self) -> None:
+        prepared_splits = [
+            {
+                "line1_variants": [{"variant_id": "l1a", "meta": {}, "image": np.zeros((4, 8), dtype=np.uint8)}],
+                "line2_variants": [{"variant_id": "l2a", "meta": {}, "image": np.zeros((4, 8), dtype=np.uint8)}],
+            },
+            {
+                "line1_variants": [{"variant_id": "l1b", "meta": {}, "image": np.zeros((4, 8), dtype=np.uint8)}],
+                "line2_variants": [{"variant_id": "l2b", "meta": {}, "image": np.zeros((4, 8), dtype=np.uint8)}],
+            },
+        ]
+
+        def fake_paddle_ocr_images(images, *, line_kind, **kwargs):
+            if line_kind == "line1":
+                return ["LINE1_A", "LINE1_B"]
+            return ["LINE2_A", "LINE2_B"]
+
+        with mock.patch("mrz.td3.ocr_pipeline._paddle_ocr_images_impl", side_effect=fake_paddle_ocr_images):
+            grouped = _run_auto_paddle_batches(prepared_splits)
+
+        self.assertEqual(len(grouped), 2)
+        self.assertEqual(grouped[0]["line1"][0]["text_raw"], "LINE1_A")
+        self.assertEqual(grouped[1]["line1"][0]["text_raw"], "LINE1_B")
+        self.assertEqual(grouped[0]["line2"][0]["text_raw"], "LINE2_A")
+        self.assertEqual(grouped[1]["line2"][0]["text_raw"], "LINE2_B")
 
     def test_accepts_uto_mrz_country_code(self) -> None:
         self.assertTrue(is_valid_mrz_country_code("UTO"))
