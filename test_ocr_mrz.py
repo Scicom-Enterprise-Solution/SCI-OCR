@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 from unittest import mock
 
+from document_preparation.passport import resize_aligned_image
 from mrz.td3.ocr_pipeline import (
     _auto_requires_tesseract,
     _apply_candidate_support_bonus,
@@ -32,11 +33,28 @@ from mrz.td3.ocr_pipeline import (
     validate_and_correct_mrz,
     validate_td3_checks,
 )
-from mrz.td3.detect import prepare_detection_roi, scale_bboxes_back
+from mrz.td3.detect import merge_bboxes, prepare_detection_roi, scale_bboxes_back
 from ocr_backends.paddle_backend import get_paddle_ocr_stats, paddle_ocr_images, reset_paddle_ocr_stats
 
 
 class TestLine1Repair(unittest.TestCase):
+    def test_resize_aligned_image_caps_oversized_input(self) -> None:
+        img = np.zeros((6752, 12000, 3), dtype=np.uint8)
+
+        resized, meta = resize_aligned_image(img, max_dim=2400)
+
+        self.assertTrue(meta["resized"])
+        self.assertEqual(meta["original_width"], 12000)
+        self.assertEqual(meta["original_height"], 6752)
+        self.assertEqual(max(resized.shape[:2]), 2400)
+        self.assertEqual(meta["width"], resized.shape[1])
+        self.assertEqual(meta["height"], resized.shape[0])
+
+    def test_merge_bboxes_keeps_single_detected_line_bbox(self) -> None:
+        merged = merge_bboxes([(100, 900, 1000, 40)])
+
+        self.assertEqual(merged, (100, 900, 1000, 40))
+
     def test_normalize_td3_line1_preserves_two_character_document_code(self) -> None:
         line = normalize_td3_line1("POJORALMOUSA<<AWS<WAJDI<FAROUR<<<<<<<<<<<<<")
 

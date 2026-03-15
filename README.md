@@ -52,6 +52,7 @@ The project loads values from `.env` automatically (if present).
 - `PADDLE_PROFILE` - Paddle search profile: `exhaustive`, `balanced`, or `fast`
 - `PDF_PATH` - Default PDF path used when no CLI argument is provided
 - `OUTPUT_DIR` - Output folder for generated images
+- `ALIGNED_MAX_DIM` - Maximum longest-side dimension for the aligned passport working image before Stage 2/3
 - `API_HOST` - API bind host
 - `API_PORT` - API bind port
 - `API_STORAGE_DIR` - API storage root for uploads, previews, reports, and SQLite DB
@@ -70,7 +71,7 @@ Template:
 ./.venv/bin/python run_pipeline.py <path-to-passport.pdf-or-image>
 ```
 
-For the current local setup, `FAST_OCR=False` and `PADDLE_PROFILE=exhaustive` are the accuracy-first defaults.
+For the current local setup, `FAST_OCR=False`, `PADDLE_PROFILE=exhaustive`, and `ALIGNED_MAX_DIM=1200` are the current accuracy-first defaults.
 
 Examples:
 
@@ -86,6 +87,13 @@ LOG_FORMAT=json ./.venv/bin/python run_pipeline.py samples/sadia.png
 ```
 
 Use `FAST_OCR=true` only for quick smoke tests. For production MRZ extraction, keep the exhaustive profile enabled.
+
+Large-image note:
+
+- very large source images can make MRZ OCR worse, not better
+- after perspective correction, the pipeline now caps the aligned working image before Stage 2/3
+- `ALIGNED_MAX_DIM=1200` is the current practical default
+- for MRZ, a working range around `1000-1200` px on the long side has been more reliable than pushing oversized aligned images through OCR unchanged
 
 ## API Server
 

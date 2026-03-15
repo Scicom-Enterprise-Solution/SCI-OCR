@@ -8,7 +8,7 @@ import cv2
 from api.config import settings
 from db import get_document, get_document_by_hash, insert_document
 from document_inputs.loader import load_document_input
-from path_utils import to_repo_relative
+from path_utils import from_repo_relative, to_repo_relative
 
 
 def ensure_storage_dirs() -> None:
@@ -30,12 +30,42 @@ def _write_preview_png(document_id: str, image_bgr) -> tuple[str, int, int]:
     return preview_path, w, h
 
 
+def _document_artifacts_exist(record: dict) -> bool:
+    stored_path = record.get("stored_path")
+    preview_path = record.get("preview_path")
+    if not stored_path or not preview_path:
+        return False
+    return (
+        os.path.isfile(from_repo_relative(stored_path))
+        and os.path.isfile(from_repo_relative(preview_path))
+    )
+
+
+def _restore_existing_document_artifacts(record: dict, file_bytes: bytes) -> dict:
+    stored_path = from_repo_relative(record["stored_path"])
+    preview_path = from_repo_relative(record["preview_path"])
+
+    if not os.path.isfile(stored_path):
+        _write_bytes(stored_path, file_bytes)
+
+    if not os.path.isfile(preview_path):
+        loaded = load_document_input(file_bytes=file_bytes, filename=record["filename"])
+        restored_preview_path, preview_width, preview_height = _write_preview_png(record["id"], loaded.image_bgr)
+        record["preview_path"] = to_repo_relative(restored_preview_path)
+        record["preview_width"] = preview_width
+        record["preview_height"] = preview_height
+
+    return record
+
+
 def create_document(file_bytes: bytes, filename: str) -> dict:
     ensure_storage_dirs()
     file_hash = hashlib.sha256(file_bytes).hexdigest()
 
     existing = get_document_by_hash(settings.db_path, file_hash)
     if existing is not None:
+        if not _document_artifacts_exist(existing):
+            existing = _restore_existing_document_artifacts(existing, file_bytes)
         existing["deduplicated"] = True
         return existing
 

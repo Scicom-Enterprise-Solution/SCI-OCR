@@ -23,6 +23,7 @@ load_env_file()
 PDF_PATH = os.getenv("PDF_PATH", "passport.pdf")   # Input PDF (override via CLI arg)
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output")
 DPI = 300
+ALIGNED_MAX_DIM = int(os.getenv("ALIGNED_MAX_DIM", "1200"))
 
 # Canny thresholds — adjust if edges are missed or noisy
 CANNY_LOW = 30
@@ -293,6 +294,44 @@ def perspective_correction(
     return warped
 
 
+def resize_aligned_image(img_bgr: np.ndarray, max_dim: int = ALIGNED_MAX_DIM) -> tuple[np.ndarray, dict]:
+    """
+    Cap the aligned working image to a predictable maximum dimension for
+    Stage 2/3. This preserves aspect ratio and avoids pushing oversized
+    source images through MRZ detection and OCR at full original resolution.
+    """
+    h, w = img_bgr.shape[:2]
+    longest = max(h, w)
+    meta = {
+        "original_width": int(w),
+        "original_height": int(h),
+        "resized": False,
+        "scale": 1.0,
+        "max_dim": int(max_dim),
+        "width": int(w),
+        "height": int(h),
+    }
+
+    if max_dim <= 0 or longest <= max_dim:
+        return img_bgr, meta
+
+    scale = max_dim / float(longest)
+    target_w = max(1, int(round(w * scale)))
+    target_h = max(1, int(round(h * scale)))
+    resized = cv2.resize(img_bgr, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    meta.update({
+        "resized": True,
+        "scale": round(scale, 6),
+        "width": int(target_w),
+        "height": int(target_h),
+    })
+    print(
+        f"[Step 4] Aligned image capped to {target_w}x{target_h} px "
+        f"(scale={scale:.3f}, max_dim={max_dim})"
+    )
+    return resized, meta
+
+
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
@@ -350,6 +389,7 @@ def main() -> None:
     # Step 4 — Perspective correction
     # ------------------------------------------------------------------
     aligned = perspective_correction(img_bgr, quad_pts)
+    aligned, _ = resize_aligned_image(aligned)
     save(aligned, "aligned_passport.png")
 
     print("\n[Pipeline] Done. All outputs written to:", to_repo_relative(OUTPUT_DIR))

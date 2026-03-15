@@ -145,6 +145,9 @@ def process_document(
             "faces_count": 0,
             "bbox": None,
         },
+        "document_preparation": {
+            "aligned_image": None,
+        },
         "mrz": {
             "detected": False,
             "detection_input": None,
@@ -207,6 +210,8 @@ def process_document(
         return report
 
     aligned = stage1.perspective_correction(img_bgr, quad_pts)
+    aligned, aligned_meta = stage1.resize_aligned_image(aligned)
+    report["document_preparation"]["aligned_image"] = aligned_meta
     stage1.save(aligned, "aligned_passport.png")
 
     face_result = {

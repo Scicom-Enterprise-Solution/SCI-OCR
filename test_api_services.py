@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import cv2
 import numpy as np
 
 from fastapi.testclient import TestClient
@@ -76,6 +77,7 @@ class TestDocumentDeduplication(unittest.TestCase):
 
         with mock.patch("api.services.document_service.ensure_storage_dirs"), \
              mock.patch("api.services.document_service.get_document_by_hash", return_value=existing), \
+             mock.patch("api.services.document_service._document_artifacts_exist", return_value=True), \
              mock.patch("api.services.document_service._write_bytes") as write_bytes, \
              mock.patch("api.services.document_service.load_document_input") as load_input:
             record = document_service.create_document(b"same-bytes", "sample.png")
@@ -84,6 +86,45 @@ class TestDocumentDeduplication(unittest.TestCase):
         self.assertTrue(record["deduplicated"])
         write_bytes.assert_not_called()
         load_input.assert_not_called()
+
+    def test_create_document_restores_missing_artifacts_for_existing_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads_dir = os.path.join(tmp, "uploads")
+            previews_dir = os.path.join(tmp, "previews")
+            os.makedirs(uploads_dir, exist_ok=True)
+            os.makedirs(previews_dir, exist_ok=True)
+
+            existing = {
+                "id": "doc-1",
+                "filename": "sample.png",
+                "file_hash": "hash-1",
+                "source_type": "image",
+                "extension": ".png",
+                "stored_path": "storage/uploads/doc-1.png",
+                "preview_path": "storage/previews/doc-1.png",
+                "preview_width": 800,
+                "preview_height": 600,
+                "created_at": "2026-03-15T00:00:00+00:00",
+            }
+            image = np.zeros((40, 80, 3), dtype=np.uint8)
+
+            with mock.patch("api.services.document_service.ensure_storage_dirs"), \
+                 mock.patch("api.services.document_service.get_document_by_hash", return_value=existing.copy()), \
+                 mock.patch("api.services.document_service.settings.storage_root", tmp), \
+                 mock.patch(
+                     "api.services.document_service.from_repo_relative",
+                     side_effect=lambda p: os.path.join(tmp, p.replace("/", os.sep).removeprefix("storage" + os.sep)),
+                 ), \
+                 mock.patch("api.services.document_service.load_document_input") as load_input:
+                load_input.return_value = mock.Mock(image_bgr=image, filename="sample.png")
+                record = document_service.create_document(b"same-bytes", "sample.png")
+
+            self.assertEqual(record["id"], "doc-1")
+            self.assertTrue(record["deduplicated"])
+            self.assertTrue(os.path.isfile(os.path.join(uploads_dir, "doc-1.png")))
+            self.assertTrue(os.path.isfile(os.path.join(previews_dir, "doc-1.png")))
+            preview = cv2.imread(os.path.join(previews_dir, "doc-1.png"))
+            self.assertIsNotNone(preview)
 
 
 class TestAPIReportRelocation(unittest.TestCase):
