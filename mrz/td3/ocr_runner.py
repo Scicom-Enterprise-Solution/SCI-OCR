@@ -262,19 +262,33 @@ def candidate_support_bonus(support_count: int) -> float:
     return (math.log2(support_count) ** 2) * CANDIDATE_SUPPORT_BONUS_SCALE
 
 
+def _candidate_support_group(candidate: dict) -> tuple:
+    variant_meta = candidate.get("variant_meta") or {}
+    return (
+        candidate.get("backend"),
+        candidate.get("split_label"),
+        variant_meta.get("source"),
+        variant_meta.get("threshold"),
+    )
+
+
 def apply_candidate_support_bonus(candidates) -> None:
     support_counts = {}
+    raw_support_counts = {}
     for cand in candidates:
         text = cand["text"]
-        support_counts[text] = support_counts.get(text, 0) + 1
+        raw_support_counts[text] = raw_support_counts.get(text, 0) + 1
+        groups = support_counts.setdefault(text, set())
+        groups.add(_candidate_support_group(cand))
 
     for cand in candidates:
-        support_count = support_counts[cand["text"]]
+        support_count = len(support_counts[cand["text"]])
         support_bonus = candidate_support_bonus(support_count)
         base_score = cand["score"]
 
         cand["base_score"] = base_score
         cand["support_count"] = support_count
+        cand["raw_support_count"] = raw_support_counts[cand["text"]]
         cand["support_bonus"] = support_bonus
         cand["score"] = base_score + support_bonus
 

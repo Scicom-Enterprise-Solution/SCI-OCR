@@ -580,6 +580,7 @@ def _serialize_line1_candidate(c: dict) -> dict:
         "psm": c["psm"],
         "checksum_pass_count": c["checksum_pass_count"],
         "support_count": c.get("support_count", 1),
+        "raw_support_count": c.get("raw_support_count", c.get("support_count", 1)),
         "support_bonus": round(c.get("support_bonus", 0.0), 2),
         "split_label": c.get("split_label"),
         "split_y": c.get("split_y"),
@@ -964,6 +965,10 @@ def run_ocr(mrz_img):
                 "split_label": selected_line1_split,
                 "variant_meta": best_pair["line1"]["variant_meta"],
                 "support_count": best_pair["line1"].get("support_count", 1),
+                "raw_support_count": best_pair["line1"].get(
+                    "raw_support_count",
+                    best_pair["line1"].get("support_count", 1),
+                ),
                 "support_bonus": round(best_pair["line1"].get("support_bonus", 0.0), 2),
             },
             "line2": {
