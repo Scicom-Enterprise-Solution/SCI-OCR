@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS extractions (
     duration_ms REAL,
     crop_json TEXT,
     rotation INTEGER NOT NULL DEFAULT 0,
+    transform_json TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
@@ -69,6 +70,7 @@ def init_db(db_path: str) -> None:
     with get_connection(db_path) as conn:
         conn.executescript(SCHEMA)
         _ensure_document_file_hash(conn)
+        _ensure_extraction_transform_json(conn)
         conn.commit()
 
 
@@ -136,8 +138,8 @@ def insert_extraction(db_path: str, record: dict[str, Any]) -> dict[str, Any]:
             """
             INSERT INTO extractions (
                 id, document_id, status, filename, line1, line2, parsed_json,
-                report_path, duration_ms, crop_json, rotation, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                report_path, duration_ms, crop_json, rotation, transform_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record["id"],
@@ -151,6 +153,7 @@ def insert_extraction(db_path: str, record: dict[str, Any]) -> dict[str, Any]:
                 record.get("duration_ms"),
                 json.dumps(record.get("crop") or {}, ensure_ascii=True) if record.get("crop") else None,
                 int(record.get("rotation", 0)),
+                json.dumps(record.get("transform") or {}, ensure_ascii=True) if record.get("transform") else None,
                 record["created_at"],
             ),
         )
@@ -166,7 +169,17 @@ def get_extraction(db_path: str, extraction_id: str) -> dict[str, Any] | None:
         return None
     payload["parsed"] = json.loads(payload.pop("parsed_json") or "{}")
     payload["crop"] = json.loads(payload.pop("crop_json") or "{}") if payload.get("crop_json") else None
+    payload["transform"] = json.loads(payload.pop("transform_json") or "{}") if payload.get("transform_json") else None
     return payload
+
+
+def _ensure_extraction_transform_json(conn: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(extractions)").fetchall()
+    }
+    if "transform_json" not in columns:
+        conn.execute("ALTER TABLE extractions ADD COLUMN transform_json TEXT")
 
 
 def upsert_reference(db_path: str, record: dict[str, Any]) -> dict[str, Any]:

@@ -94,6 +94,36 @@ def run_reference_set(backend: str) -> int:
     sample_timings: list[tuple[str, float, bool]] = []
     sample_results: list[dict] = []
 
+    def build_sample_result(
+        *,
+        filename: str,
+        status: str,
+        elapsed_s: float,
+        actual1: str,
+        actual2: str,
+        report: dict,
+        expected1: str = "",
+        expected2: str = "",
+        reason: str = "",
+        error: str = "",
+    ) -> dict:
+        item = {
+            "filename": filename,
+            "status": status,
+            "elapsed_s": round(elapsed_s, 2),
+            "line1": actual1,
+            "line2": actual2,
+            "report": report,
+        }
+        if status != "PASS":
+            item.update({
+                "expected_line1": expected1,
+                "expected_line2": expected2,
+                "reason": reason,
+                "error": error,
+            })
+        return item
+
     original_backend = os.environ.get("OCR_BACKEND")
     os.environ["OCR_BACKEND"] = backend
 
@@ -152,13 +182,16 @@ def run_reference_set(backend: str) -> int:
                 )
                 passes.append(filename)
                 sample_timings.append((filename, elapsed_s, True))
-                sample_results.append({
-                    "filename": filename,
-                    "status": "PASS",
-                    "elapsed_s": round(elapsed_s, 2),
-                    "line1": actual1,
-                    "line2": actual2,
-                })
+                sample_results.append(
+                    build_sample_result(
+                        filename=filename,
+                        status="PASS",
+                        elapsed_s=elapsed_s,
+                        actual1=actual1,
+                        actual2=actual2,
+                        report=report,
+                    )
+                )
             else:
                 elapsed_s = time.perf_counter() - started_at
                 print_sample_result(
@@ -183,17 +216,20 @@ def run_reference_set(backend: str) -> int:
                     "error": error or report.get("error", ""),
                 }
                 fails.append(fail_item)
-                sample_results.append({
-                    "filename": filename,
-                    "status": "FAIL",
-                    "elapsed_s": round(elapsed_s, 2),
-                    "line1": actual1,
-                    "line2": actual2,
-                    "expected_line1": expected1,
-                    "expected_line2": expected2,
-                    "reason": fail_item["reason"],
-                    "error": fail_item["error"],
-                })
+                sample_results.append(
+                    build_sample_result(
+                        filename=filename,
+                        status="FAIL",
+                        elapsed_s=elapsed_s,
+                        actual1=actual1,
+                        actual2=actual2,
+                        report=report,
+                        expected1=expected1,
+                        expected2=expected2,
+                        reason=fail_item["reason"],
+                        error=fail_item["error"],
+                    )
+                )
     finally:
         if original_backend is None:
             os.environ.pop("OCR_BACKEND", None)

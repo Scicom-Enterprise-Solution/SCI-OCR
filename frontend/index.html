@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MRZ Workbench</title>
+  <link rel="stylesheet" href="/frontend/styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">TD3 Passport MRZ</p>
+        <h1>Upload, align, extract.</h1>
+        <p class="lede">
+          Plain HTML and JavaScript frontend for the MRZ API. Adjust rotation, zoom, and page
+          position before extraction while keeping the upload flow separate.
+        </p>
+      </div>
+      <form id="upload-form" class="upload-panel">
+        <label class="file-drop" for="file-input">
+          <input id="file-input" name="file" type="file" accept="image/*,.pdf" required>
+          <span class="file-drop-label">Choose passport image or PDF</span>
+          <span class="file-drop-hint">Upload first, then adjust preview before extraction.</span>
+        </label>
+        <button id="upload-button" type="submit">Upload Document</button>
+      </form>
+    </section>
+
+    <section class="workspace">
+      <div class="toolbar">
+        <div class="toolbar-group">
+          <button id="rotate-left" type="button" disabled>Rotate -90</button>
+          <button id="rotate-right" type="button" disabled>Rotate +90</button>
+          <button id="reset-adjust" type="button" disabled>Reset Adjust</button>
+        </div>
+        <div class="toolbar-group">
+          <label class="toggle">
+            <input id="use-face-hint" type="checkbox">
+            <span>Use face hint</span>
+          </label>
+          <button id="extract-button" type="button" disabled>Run Extraction</button>
+        </div>
+      </div>
+
+      <div class="workspace-grid">
+        <section class="viewer-panel">
+          <div class="viewer-meta">
+            <div>
+              <strong id="doc-name">No document</strong>
+              <p id="doc-meta">Upload a file to begin.</p>
+            </div>
+            <div class="chip-row">
+              <span id="doc-id-chip" class="chip">document: -</span>
+              <span id="rotation-chip" class="chip">rotation: 0</span>
+            </div>
+          </div>
+          <div id="viewer-frame" class="viewer-frame empty">
+            <canvas id="preview-canvas" width="720" height="480"></canvas>
+          </div>
+          <p class="viewer-help">
+            Drag on the image to move it inside the working frame. Use the sliders and zoom controls
+            for fine alignment before extraction.
+          </p>
+          <div class="adjust-panel">
+            <label>
+              <span>Micro rotate</span>
+              <input id="micro-rotate" type="range" min="-4" max="4" step="0.1" value="0">
+            </label>
+            <label>
+              <span>Zoom</span>
+              <div class="zoom-control">
+                <button id="zoom-out" type="button" disabled>-</button>
+                <input id="zoom-range" type="range" min="1" max="2.2" step="0.01" value="1">
+                <button id="zoom-in" type="button" disabled>+</button>
+              </div>
+            </label>
+            <label>
+              <span>Left / Right</span>
+              <input id="offset-x-range" type="range" min="-0.2" max="0.2" step="0.002" value="0">
+            </label>
+            <label>
+              <span>Top / Bottom</span>
+              <input id="offset-y-range" type="range" min="-0.6" max="0.6" step="0.002" value="0">
+            </label>
+          </div>
+        </section>
+
+        <aside class="side-panel">
+          <section class="panel-block">
+            <h2>Adjustment Analysis</h2>
+            <div id="crop-analysis-output" class="analysis-output">
+              <p class="analysis-empty">No document loaded.</p>
+            </div>
+          </section>
+          <details class="panel-block collapsible-block">
+            <summary class="collapsible-summary">
+              <h2>Request Payload</h2>
+            </summary>
+            <pre id="request-json">{
+  "document_id": null,
+  "rotation": 0,
+  "crop": null,
+  "use_face_hint": false
+}</pre>
+          </details>
+          <details class="panel-block collapsible-block">
+            <summary class="collapsible-summary">
+              <h2>Upload Response</h2>
+            </summary>
+            <pre id="upload-json">No upload yet.</pre>
+          </details>
+          <section class="panel-block">
+            <h2>Result Analysis</h2>
+            <div id="analysis-output" class="analysis-output">
+              <p class="analysis-empty">No extraction yet.</p>
+            </div>
+          </section>
+          <details class="panel-block collapsible-block">
+            <summary class="collapsible-summary">
+              <h2>Extraction Result</h2>
+            </summary>
+            <pre id="result-json">No extraction yet.</pre>
+          </details>
+          <details class="panel-block collapsible-block">
+            <summary class="collapsible-summary">
+              <h2>Status</h2>
+            </summary>
+            <p id="status-text">Idle.</p>
+          </details>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <script src="/frontend/app.js"></script>
+</body>
+</html>

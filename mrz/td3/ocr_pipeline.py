@@ -95,7 +95,7 @@ from mrz.td3.variants import (
     ocr_search_profile,
     prepare_variants,
     split_mrz_lines as split_mrz_lines_impl,
-    split_mrz_lines_at,
+    split_mrz_lines_at as split_mrz_lines_at_impl,
 )
 from ocr_backends.tesseract_backend import (
     build_ocr_configs,
@@ -252,11 +252,7 @@ def split_mrz_lines(img):
 
 
 def split_mrz_lines_at(gray, split_y: int):
-    h = gray.shape[0]
-    split_y = max(8, min(h - 8, int(split_y)))
-    line1 = gray[:split_y, :]
-    line2 = gray[split_y:, :]
-    return line1, line2
+    return split_mrz_lines_at_impl(gray, split_y)
 
 
 def build_split_candidates(gray, base_meta: dict, profile: dict | None = None):
@@ -572,6 +568,41 @@ def _pair_selection_key(candidate_pair: dict) -> tuple:
         candidate_pair["line1"]["text"],
         candidate_pair["line2"]["text"],
     )
+
+
+def _serialize_line1_candidate(c: dict) -> dict:
+    return {
+        "text": c["text"],
+        "score": round(c["score"], 2),
+        "base_score": round(c.get("base_score", c["score"]), 2),
+        "selection_penalty": round(c.get("selection_penalty", 0.0), 2),
+        "variant_id": c["variant_id"],
+        "psm": c["psm"],
+        "checksum_pass_count": c["checksum_pass_count"],
+        "support_count": c.get("support_count", 1),
+        "support_bonus": round(c.get("support_bonus", 0.0), 2),
+        "split_label": c.get("split_label"),
+        "split_y": c.get("split_y"),
+        "variant_meta": c.get("variant_meta"),
+        "backend": c.get("backend"),
+        "spill_trimmed": bool(c.get("spill_trimmed", False)),
+        "repairs": list(c.get("repairs", [])),
+    }
+
+
+def _serialize_line2_candidate(c: dict) -> dict:
+    return {
+        "text": c["text"],
+        "score": round(c["score"], 2),
+        "variant_id": c["variant_id"],
+        "psm": c["psm"],
+        "checksum_pass_count": c["checksum_pass_count"],
+        "split_label": c.get("split_label"),
+        "split_y": c.get("split_y"),
+        "variant_meta": c.get("variant_meta"),
+        "backend": c.get("backend"),
+        "checks": c.get("checks"),
+    }
 
 
 def run_ocr(mrz_img):
@@ -911,32 +942,10 @@ def run_ocr(mrz_img):
             "line1_candidates": len(line1_ranked),
             "line2_candidates": len(line2_ranked),
             "pairs_evaluated": pair_count,
-            "line1_top": [
-                {
-                    "text": c["text"],
-                    "score": round(c["score"], 2),
-                    "base_score": round(c.get("base_score", c["score"]), 2),
-                    "selection_penalty": round(c.get("selection_penalty", 0.0), 2),
-                    "variant_id": c["variant_id"],
-                    "psm": c["psm"],
-                    "checksum_pass_count": c["checksum_pass_count"],
-                    "support_count": c.get("support_count", 1),
-                    "support_bonus": round(c.get("support_bonus", 0.0), 2),
-                    "split_label": c.get("split_label"),
-                }
-                for c in line1_top
-            ],
-            "line2_top": [
-                {
-                    "text": c["text"],
-                    "score": round(c["score"], 2),
-                    "variant_id": c["variant_id"],
-                    "psm": c["psm"],
-                    "checksum_pass_count": c["checksum_pass_count"],
-                    "split_label": c.get("split_label"),
-                }
-                for c in line2_top
-            ],
+            "line1_top": [_serialize_line1_candidate(c) for c in line1_top],
+            "line2_top": [_serialize_line2_candidate(c) for c in line2_top],
+            "line1_all": [_serialize_line1_candidate(c) for c in line1_ranked],
+            "line2_all": [_serialize_line2_candidate(c) for c in line2_ranked],
         },
         "selected": {
             "line1": {

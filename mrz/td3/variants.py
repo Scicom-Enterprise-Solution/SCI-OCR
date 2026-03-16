@@ -17,6 +17,9 @@ PADDLE_BALANCED_VARIANT_SOURCES = ("gray", "clahe")
 PADDLE_BALANCED_VARIANT_SCALES = (2, 3)
 PADDLE_BALANCED_VARIANT_THRESHOLDS = ("otsu", "adaptive", "otsu_thick")
 PADDLE_BALANCED_SPLIT_LABELS = ("projection", "half", "projection_m4", "projection_p4")
+SPLIT_LINE_BOUNDARY_PAD_RATIO = 0.08
+SPLIT_LINE_BOUNDARY_PAD_MIN = 4
+SPLIT_LINE_BOUNDARY_PAD_MAX = 10
 
 
 def clean_mrz_image(mrz_img):
@@ -29,6 +32,41 @@ def clean_mrz_image(mrz_img):
     img = cv2.GaussianBlur(img, (3, 3), 0)
     _, img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return img
+
+
+def _pad_split_lines(
+    line1: np.ndarray,
+    line2: np.ndarray,
+    source_height: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    # Preserve the chosen split, but add whitespace around the boundary so
+    # each OCR line keeps some separation from the neighboring line.
+    pad = max(
+        SPLIT_LINE_BOUNDARY_PAD_MIN,
+        min(SPLIT_LINE_BOUNDARY_PAD_MAX, int(round(source_height * SPLIT_LINE_BOUNDARY_PAD_RATIO))),
+    )
+    if pad <= 0:
+        return line1, line2
+
+    line1 = cv2.copyMakeBorder(
+        line1,
+        0,
+        pad,
+        0,
+        0,
+        borderType=cv2.BORDER_CONSTANT,
+        value=255,
+    )
+    line2 = cv2.copyMakeBorder(
+        line2,
+        pad,
+        0,
+        0,
+        0,
+        borderType=cv2.BORDER_CONSTANT,
+        value=255,
+    )
+    return line1, line2
 
 
 def _to_gray(img):
@@ -229,6 +267,7 @@ def split_mrz_lines(img, *, save_debug):
 
     line1 = gray[:split_y, :]
     line2 = gray[split_y:, :]
+    line1, line2 = _pad_split_lines(line1, line2, h)
 
     vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     cv2.line(vis, (0, split_y), (gray.shape[1] - 1, split_y), (0, 255, 0), 2)
@@ -265,7 +304,7 @@ def split_mrz_lines_at(gray, split_y: int):
     split_y = max(8, min(h - 8, int(split_y)))
     line1 = gray[:split_y, :]
     line2 = gray[split_y:, :]
-    return line1, line2
+    return _pad_split_lines(line1, line2, h)
 
 
 def build_split_candidates(gray, base_meta: dict, profile: dict):

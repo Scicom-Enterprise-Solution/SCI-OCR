@@ -10,10 +10,20 @@ class CropBox(BaseModel):
     height: float = Field(gt=0.0, le=1.0)
 
 
+class ImageTransform(BaseModel):
+    micro_rotation: float = Field(default=0.0, ge=-15.0, le=15.0)
+    zoom: float = Field(default=1.0, ge=0.5, le=3.0)
+    offset_x: float = Field(default=0.0, ge=-1.0, le=1.0)
+    offset_y: float = Field(default=0.0, ge=-1.0, le=1.0)
+    viewport_width: int | None = Field(default=None, ge=1, le=4000)
+    viewport_height: int | None = Field(default=None, ge=1, le=4000)
+
+
 class ExtractionRequest(BaseModel):
     document_id: str
     crop: CropBox | None = None
     rotation: int = Field(default=0)
+    transform: ImageTransform | None = None
     use_face_hint: bool = Field(default=False)
 
 
@@ -31,7 +41,6 @@ class UploadResponse(BaseModel):
     extension: str
     file_hash: str | None = None
     deduplicated: bool = False
-    preview_path: str
     preview_width: int
     preview_height: int
 

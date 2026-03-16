@@ -8,18 +8,24 @@ def _with_prefix(filename: str, prefix: str | None) -> str:
     return f"{prefix}_{filename}"
 
 
-def detect_mrz_with_rotation_fallback(aligned_bgr, output_prefix: str | None = None):
+def detect_mrz_with_rotation_fallback(
+    aligned_bgr,
+    output_prefix: str | None = None,
+    *,
+    allow_rotation_fallback: bool = True,
+):
     """
     Try MRZ detection on current image and common rotations.
 
     Returns (working_image, mrz_lines, mrz_bbox, used_label) or None.
     """
-    attempts = [
-        ("original", None),
-        ("rot90_clockwise", cv2.ROTATE_90_CLOCKWISE),
-        ("rot90_counterclockwise", cv2.ROTATE_90_COUNTERCLOCKWISE),
-        ("rot180", cv2.ROTATE_180),
-    ]
+    attempts = [("original", None)]
+    if allow_rotation_fallback:
+        attempts.extend([
+            ("rot90_clockwise", cv2.ROTATE_90_CLOCKWISE),
+            ("rot90_counterclockwise", cv2.ROTATE_90_COUNTERCLOCKWISE),
+            ("rot180", cv2.ROTATE_180),
+        ])
 
     for label, rotate_code in attempts:
         working = aligned_bgr if rotate_code is None else cv2.rotate(aligned_bgr, rotate_code)

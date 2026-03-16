@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 
 from api.schemas import ExtractionRequest, ExtractionResponse
-from api.services.extraction_service import create_extraction
+from api.services.extraction_service import create_extraction, fetch_extraction_report_path
 from logger_utils import log_event
 
 
@@ -22,6 +23,7 @@ def extract_document(request: ExtractionRequest) -> ExtractionResponse:
             document_id=request.document_id,
             crop=request.crop.model_dump() if request.crop else None,
             rotation=request.rotation,
+            transform=request.transform.model_dump() if request.transform else None,
             use_face_hint=request.use_face_hint,
         )
     except FileNotFoundError as exc:
@@ -62,3 +64,24 @@ def extract_document(request: ExtractionRequest) -> ExtractionResponse:
         report_path=record.get("report_path"),
         document_id=record["document_id"],
     )
+
+
+@router.get("/{extraction_id}/report")
+def get_extraction_report(extraction_id: str) -> FileResponse:
+    try:
+        report_path = fetch_extraction_report_path(extraction_id)
+    except FileNotFoundError as exc:
+        log_event(
+            "api_extraction_report_failed",
+            level="error",
+            extraction_id=extraction_id,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    log_event(
+        "api_extraction_report_served",
+        extraction_id=extraction_id,
+        report_path=report_path,
+    )
+    return FileResponse(report_path, media_type="application/json")

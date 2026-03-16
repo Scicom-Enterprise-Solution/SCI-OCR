@@ -42,7 +42,6 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
         file_hash=record.get("file_hash"),
         deduplicated=bool(record.get("deduplicated")),
         source_type=record["source_type"],
-        preview_path=record["preview_path"],
         preview_width=record["preview_width"],
         preview_height=record["preview_height"],
     )
@@ -54,7 +53,6 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
         extension=record["extension"],
         file_hash=record.get("file_hash"),
         deduplicated=bool(record.get("deduplicated")),
-        preview_path=record["preview_path"],
         preview_width=record["preview_width"],
         preview_height=record["preview_height"],
     )

@@ -96,3 +96,19 @@ def create_document(file_bytes: bytes, filename: str) -> dict:
 
 def fetch_document(document_id: str) -> dict | None:
     return get_document(settings.db_path, document_id)
+
+
+def fetch_document_preview_path(document_id: str) -> str:
+    record = fetch_document(document_id)
+    if record is None:
+        raise FileNotFoundError(f"document not found: {document_id}")
+
+    preview_path = record.get("preview_path")
+    if not preview_path:
+        raise FileNotFoundError(f"preview not available for document: {document_id}")
+
+    absolute_preview_path = from_repo_relative(preview_path)
+    if not os.path.isfile(absolute_preview_path):
+        raise FileNotFoundError(f"preview file not found for document: {document_id}")
+
+    return absolute_preview_path

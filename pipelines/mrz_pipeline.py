@@ -102,6 +102,9 @@ def process_document(
     file_bytes: bytes | None = None,
     filename: str | None = None,
     use_face_hint: bool = True,
+    skip_document_alignment: bool = False,
+    strict_input_orientation: bool = False,
+    prealigned_input: bool = False,
     emit_progress: bool = True,
 ) -> dict:
     started_at = time.perf_counter()
@@ -185,34 +188,48 @@ def process_document(
     img_bgr = loaded_input.image_bgr
     stage1.save(img_bgr, "rendered_page.png")
 
-    edges, detection_scale = stage1.preprocess_image(img_bgr)
-    edges_display = cv2.resize(
-        edges,
-        (img_bgr.shape[1], img_bgr.shape[0]),
-        interpolation=cv2.INTER_NEAREST,
-    )
-    stage1.save(edges_display, "edges.png")
+    if prealigned_input:
+        log("[Stage 1] Frontend-prepared input detected; skipping all document-alignment actions.")
+        aligned = img_bgr.copy()
+        aligned, aligned_meta = stage1.resize_aligned_image(aligned)
+        report["document_preparation"]["aligned_image"] = aligned_meta
+        stage1.save(aligned, "aligned_passport.png")
+    else:
+        if skip_document_alignment:
+            log("[Stage 1] Skipping document contour alignment; using provided image as working page.")
+            aligned = img_bgr.copy()
+            aligned, aligned_meta = stage1.resize_aligned_image(aligned)
+            report["document_preparation"]["aligned_image"] = aligned_meta
+            stage1.save(aligned, "aligned_passport.png")
+        else:
+            edges, detection_scale = stage1.preprocess_image(img_bgr)
+            edges_display = cv2.resize(
+                edges,
+                (img_bgr.shape[1], img_bgr.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            stage1.save(edges_display, "edges.png")
 
-    quad_pts, contour_debug = stage1.find_document_contour(edges, img_bgr, detection_scale)
-    stage1.save(contour_debug, "contours.png")
+            quad_pts, contour_debug = stage1.find_document_contour(edges, img_bgr, detection_scale)
+            stage1.save(contour_debug, "contours.png")
 
-    if quad_pts is None:
-        report["timings"]["stage1_document_preparation_ms"] = round(
-            (time.perf_counter() - stage_started_at) * 1000.0, 2
-        )
-        report["status"] = "failed"
-        report["error"] = "stage1_document_contour_not_found"
-        finalize_report(report)
-        report["report_path"] = write_pipeline_report(output_dir, report)
-        log(f"[Report] {report['report_path']}")
-        log("\n[Pipeline] STAGE 1 FAILED: could not locate a document boundary.")
-        log("           Check output/edges.png and output/contours.png for clues.")
-        return report
+            if quad_pts is None:
+                report["timings"]["stage1_document_preparation_ms"] = round(
+                    (time.perf_counter() - stage_started_at) * 1000.0, 2
+                )
+                report["status"] = "failed"
+                report["error"] = "stage1_document_contour_not_found"
+                finalize_report(report)
+                report["report_path"] = write_pipeline_report(output_dir, report)
+                log(f"[Report] {report['report_path']}")
+                log("\n[Pipeline] STAGE 1 FAILED: could not locate a document boundary.")
+                log("           Check output/edges.png and output/contours.png for clues.")
+                return report
 
-    aligned = stage1.perspective_correction(img_bgr, quad_pts)
-    aligned, aligned_meta = stage1.resize_aligned_image(aligned)
-    report["document_preparation"]["aligned_image"] = aligned_meta
-    stage1.save(aligned, "aligned_passport.png")
+            aligned = stage1.perspective_correction(img_bgr, quad_pts)
+            aligned, aligned_meta = stage1.resize_aligned_image(aligned)
+            report["document_preparation"]["aligned_image"] = aligned_meta
+            stage1.save(aligned, "aligned_passport.png")
 
     face_result = {
         "image": aligned,
@@ -221,7 +238,10 @@ def process_document(
         "face_bbox": None,
     }
 
-    if use_face_hint:
+    if prealigned_input or strict_input_orientation:
+        aligned_for_stage2 = aligned
+        log("[Stage 1] Preserving provided orientation; skipping face-based orientation hint.")
+    elif use_face_hint:
         face_result = orient_with_face_hint(aligned)
         aligned_for_stage2 = face_result["image"]
     else:
@@ -269,7 +289,10 @@ def process_document(
     for source_label, source_image in stage2_attempts:
         report["mrz"]["detection_inputs_tried"].append(source_label)
         log(f"[Stage 2] Detection source: {source_label}")
-        detection_result = detect_mrz_with_rotation_fallback(source_image)
+        detection_result = detect_mrz_with_rotation_fallback(
+            source_image,
+            allow_rotation_fallback=not strict_input_orientation,
+        )
         if detection_result:
             detection_input = source_label
             break

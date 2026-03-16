@@ -53,6 +53,7 @@ MIN_ASPECT_RATIO       = 5.0    # width / height — MRZ lines are very elongate
 MIN_WIDTH_FRACTION     = 0.50   # bounding box width > 50% of passport width
 MAX_HEIGHT_FRACTION    = 0.15   # bounding box height < 15% of passport height
 LOWER_HALF_FRACTION    = 0.45   # top of bounding box must be below this y fraction
+MIN_MERGED_HEIGHT_FRACTION = 0.06  # merged TD3 MRZ band should not be implausibly thin
 
 # Number of MRZ lines to collect (standard passport MRZ = 2 lines)
 MRZ_LINE_COUNT = 2
@@ -408,6 +409,21 @@ def merge_bboxes(
     return merged
 
 
+def is_plausible_merged_mrz_bbox(
+    bbox: tuple[int, int, int, int],
+    img_h: int,
+) -> bool:
+    _, _, _, h = bbox
+    min_height = max(1, int(round(img_h * MIN_MERGED_HEIGHT_FRACTION)))
+    if h < min_height:
+        print(
+            f"[Step 6] [FAIL] Rejected merged MRZ bbox as too thin: "
+            f"h={h}px < min={min_height}px ({MIN_MERGED_HEIGHT_FRACTION:.2%} of image height)"
+        )
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Step 7 — Crop MRZ region
 # ---------------------------------------------------------------------------
@@ -535,6 +551,9 @@ def main() -> None:
 
     # Merge the individual line bboxes into one combined rectangle
     mrz_bbox = merge_bboxes(mrz_lines)
+    if not is_plausible_merged_mrz_bbox(mrz_bbox, img_bgr.shape[0]):
+        print("\n[Pipeline] Aborting: merged MRZ region is not structurally plausible.")
+        sys.exit(1)
 
     # ------------------------------------------------------------------
     # Step 7 — Crop MRZ
