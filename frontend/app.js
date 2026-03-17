@@ -12,6 +12,7 @@ const state = {
   canvasScale: 1,
   canvasBounds: { x: 0, y: 0, width: 0, height: 0 },
   isBusy: false,
+  previewMat: null,
 };
 
 const els = {
@@ -35,6 +36,7 @@ const els = {
   docMeta: document.querySelector("#doc-meta"),
   docIdChip: document.querySelector("#doc-id-chip"),
   rotationChip: document.querySelector("#rotation-chip"),
+  engineChip: document.querySelector("#engine-chip"),
   cropAnalysisOutput: document.querySelector("#crop-analysis-output"),
   requestJson: document.querySelector("#request-json"),
   uploadJson: document.querySelector("#upload-json"),
@@ -53,10 +55,44 @@ const ZOOM_MIN = 1.0;
 const ZOOM_MAX = 2.2;
 const DRAG_SENSITIVITY = 0.35;
 const MRZ_FOCUS_HEIGHT = 0.30;
+const cvState = {
+  ready: false,
+  failed: false,
+  pollCount: 0,
+  hooked: false,
+};
 
 function setStatus(message, isError = false) {
   els.statusText.textContent = message;
   els.statusText.classList.toggle("status-error", isError);
+}
+
+function updateEngineChip() {
+  if (cvState.ready) {
+    els.engineChip.textContent = "preview: OpenCV.js";
+    els.engineChip.classList.add("chip-ready");
+    els.engineChip.classList.remove("chip-muted");
+    return;
+  }
+  if (cvState.failed) {
+    els.engineChip.textContent = "preview: canvas only";
+    els.engineChip.classList.add("chip-muted");
+    els.engineChip.classList.remove("chip-ready");
+    return;
+  }
+  els.engineChip.textContent = "preview: loading OpenCV.js";
+  els.engineChip.classList.add("chip-muted");
+  els.engineChip.classList.remove("chip-ready");
+}
+
+function markOpenCvReady() {
+  if (cvState.ready) {
+    return;
+  }
+  cvState.ready = true;
+  cvState.failed = false;
+  updateEngineChip();
+  renderCanvas();
 }
 
 function formatJson(value) {
@@ -94,6 +130,35 @@ function getRotatedImageSize() {
   return swapAxes
     ? { width: state.previewImage.height, height: state.previewImage.width }
     : { width: state.previewImage.width, height: state.previewImage.height };
+}
+
+function releaseMat(key) {
+  const mat = state[key];
+  if (mat && typeof mat.delete === "function") {
+    mat.delete();
+  }
+  state[key] = null;
+}
+
+function clearPreviewMats() {
+  releaseMat("previewMat");
+}
+
+function getPreviewMat() {
+  if (!state.previewImage || !window.cv || !cvState.ready) {
+    return null;
+  }
+  if (state.previewMat) {
+    return state.previewMat;
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = state.previewImage.width;
+  canvas.height = state.previewImage.height;
+  const offscreen = canvas.getContext("2d");
+  offscreen.drawImage(state.previewImage, 0, 0);
+  state.previewMat = window.cv.imread(canvas);
+  return state.previewMat;
 }
 
 function getPaddedPreviewSource() {
@@ -438,15 +503,32 @@ function drawCropRect(rectPx) {
   ctx.restore();
 }
 
-function renderCanvas() {
-  if (!state.previewImage) {
-    els.viewerFrame.classList.add("empty");
-    drawEmptyCanvas();
-    return;
-  }
+function drawOverlay(targetWidth, targetHeight) {
+  const frameX = targetWidth * WORKING_FRAME_MARGIN_X;
+  const frameY = targetHeight * WORKING_FRAME_MARGIN_Y;
+  const frameWidth = targetWidth * (1 - (WORKING_FRAME_MARGIN_X * 2));
+  const frameHeight = targetHeight * (1 - (WORKING_FRAME_MARGIN_Y * 2));
+  const mrzFocusY = frameY + (frameHeight * (1 - MRZ_FOCUS_HEIGHT));
+  const mrzFocusHeight = frameHeight * MRZ_FOCUS_HEIGHT;
 
-  els.viewerFrame.classList.remove("empty");
-  const image = state.previewImage;
+  ctx.save();
+  ctx.fillStyle = "rgba(40, 112, 197, 0.20)";
+  ctx.beginPath();
+  ctx.rect(0, 0, targetWidth, targetHeight);
+  ctx.rect(frameX, frameY, frameWidth, frameHeight);
+  ctx.fill("evenodd");
+  ctx.strokeStyle = "rgba(34, 139, 34, 0.95)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(frameX, frameY, frameWidth, frameHeight);
+  ctx.fillStyle = "rgba(40, 112, 197, 0.16)";
+  ctx.fillRect(frameX, frameY, frameWidth, Math.max(0, mrzFocusY - frameY));
+  ctx.strokeStyle = "rgba(20, 92, 170, 0.45)";
+  ctx.setLineDash([8, 6]);
+  ctx.strokeRect(frameX, mrzFocusY, frameWidth, mrzFocusHeight);
+  ctx.restore();
+}
+
+function renderCanvasWithCanvas() {
   const source = getPaddedPreviewSource();
   const rotated = getRotatedImageSize();
   const targetWidth = Math.max(320, Math.round(els.viewerFrame.clientWidth - 2));
@@ -481,30 +563,93 @@ function renderCanvas() {
     ctx.drawImage(source, -source.width / 2, -source.height / 2);
   }
   ctx.restore();
+  drawOverlay(targetWidth, targetHeight);
+}
 
-  // Keep a visible centered working frame; the backend crops to this box.
-  const frameX = targetWidth * WORKING_FRAME_MARGIN_X;
-  const frameY = targetHeight * WORKING_FRAME_MARGIN_Y;
-  const frameWidth = targetWidth * (1 - (WORKING_FRAME_MARGIN_X * 2));
-  const frameHeight = targetHeight * (1 - (WORKING_FRAME_MARGIN_Y * 2));
-  const mrzFocusY = frameY + (frameHeight * (1 - MRZ_FOCUS_HEIGHT));
-  const mrzFocusHeight = frameHeight * MRZ_FOCUS_HEIGHT;
+function renderCanvasWithOpenCv() {
+  const cv = window.cv;
+  const source = getPreviewMat();
+  if (!source) {
+    renderCanvasWithCanvas();
+    return;
+  }
 
-  ctx.save();
-  ctx.fillStyle = "rgba(40, 112, 197, 0.20)";
-  ctx.beginPath();
-  ctx.rect(0, 0, targetWidth, targetHeight);
-  ctx.rect(frameX, frameY, frameWidth, frameHeight);
-  ctx.fill("evenodd");
-  ctx.strokeStyle = "rgba(34, 139, 34, 0.95)";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(frameX, frameY, frameWidth, frameHeight);
-  ctx.fillStyle = "rgba(40, 112, 197, 0.16)";
-  ctx.fillRect(frameX, frameY, frameWidth, Math.max(0, mrzFocusY - frameY));
-  ctx.strokeStyle = "rgba(20, 92, 170, 0.45)";
-  ctx.setLineDash([8, 6]);
-  ctx.strokeRect(frameX, mrzFocusY, frameWidth, mrzFocusHeight);
-  ctx.restore();
+  const rotatedBase = new cv.Mat();
+  if (state.rotation === 90) {
+    cv.rotate(source, rotatedBase, cv.ROTATE_90_CLOCKWISE);
+  } else if (state.rotation === 180) {
+    cv.rotate(source, rotatedBase, cv.ROTATE_180);
+  } else if (state.rotation === 270) {
+    cv.rotate(source, rotatedBase, cv.ROTATE_90_COUNTERCLOCKWISE);
+  } else {
+    source.copyTo(rotatedBase);
+  }
+
+  const targetWidth = Math.max(320, Math.round(els.viewerFrame.clientWidth - 2));
+  const targetHeight = Math.max(240, Math.round(els.viewerFrame.clientHeight - 2));
+  const h = rotatedBase.rows;
+  const w = rotatedBase.cols;
+  const padX = Math.round(w * TRANSFORM_PAD_RATIO);
+  const padY = Math.round(h * TRANSFORM_PAD_RATIO);
+  const padded = new cv.Mat();
+  cv.copyMakeBorder(rotatedBase, padded, padY, padY, padX, padX, cv.BORDER_REPLICATE);
+
+  const centerX = padded.cols / 2.0;
+  const centerY = padded.rows / 2.0;
+  const matrix = cv.getRotationMatrix2D(
+    new cv.Point(centerX, centerY),
+    -state.microRotation,
+    state.zoom
+  );
+  matrix.doublePtr(0, 2)[0] += state.offsetX * w;
+  matrix.doublePtr(1, 2)[0] += state.offsetY * h;
+
+  const scale = Math.min(targetWidth / w, targetHeight / h);
+  matrix.doublePtr(0, 0)[0] *= scale;
+  matrix.doublePtr(0, 1)[0] *= scale;
+  matrix.doublePtr(1, 0)[0] *= scale;
+  matrix.doublePtr(1, 1)[0] *= scale;
+  matrix.doublePtr(0, 2)[0] += (targetWidth / 2.0) - (centerX * scale);
+  matrix.doublePtr(1, 2)[0] += (targetHeight / 2.0) - (centerY * scale);
+
+  const rendered = new cv.Mat();
+  cv.warpAffine(
+    padded,
+    rendered,
+    matrix,
+    new cv.Size(targetWidth, targetHeight),
+    cv.INTER_LINEAR,
+    cv.BORDER_CONSTANT,
+    new cv.Scalar(255, 255, 255, 255)
+  );
+
+  els.canvas.width = targetWidth;
+  els.canvas.height = targetHeight;
+  state.canvasScale = scale;
+  state.canvasBounds = { x: 0, y: 0, width: targetWidth, height: targetHeight };
+  cv.imshow(els.canvas, rendered);
+  drawOverlay(targetWidth, targetHeight);
+
+  rendered.delete();
+  matrix.delete();
+  padded.delete();
+  rotatedBase.delete();
+}
+
+function renderCanvas() {
+  if (!state.previewImage) {
+    els.viewerFrame.classList.add("empty");
+    drawEmptyCanvas();
+    return;
+  }
+
+  els.viewerFrame.classList.remove("empty");
+  if (window.cv && cvState.ready) {
+    renderCanvasWithOpenCv();
+    return;
+  }
+
+  renderCanvasWithCanvas();
 }
 
 function getCanvasPointer(event) {
@@ -554,6 +699,7 @@ async function handleUpload(event) {
     state.upload = payload;
     state.documentId = payload.document_id;
     state.previewImage = image;
+    clearPreviewMats();
     state.rotation = 0;
     state.microRotation = 0;
     state.zoom = 1;
@@ -661,7 +807,36 @@ function handleResize() {
   renderCanvas();
 }
 
+function waitForOpenCv() {
+  if (window.cv && typeof window.cv.Mat === "function") {
+    markOpenCvReady();
+    return;
+  }
+
+  if (window.cv && !cvState.hooked) {
+    const previous = window.cv.onRuntimeInitialized;
+    window.cv.onRuntimeInitialized = () => {
+      if (typeof previous === "function") {
+        previous();
+      }
+      markOpenCvReady();
+    };
+    cvState.hooked = true;
+  }
+
+  cvState.pollCount += 1;
+  if (cvState.pollCount > 200) {
+    cvState.failed = true;
+    updateEngineChip();
+    return;
+  }
+
+  window.setTimeout(waitForOpenCv, 150);
+}
+
 function init() {
+  waitForOpenCv();
+  updateEngineChip();
   drawEmptyCanvas();
   updateDocumentSummary();
   updateControls();

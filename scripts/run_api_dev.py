@@ -16,9 +16,11 @@ def main() -> None:
     except ImportError as exc:
         raise SystemExit("uvicorn is required to run the API server.") from exc
 
+    host = os.getenv("API_DEV_HOST", "0.0.0.0").strip() or "0.0.0.0"
+
     uvicorn.run(
         "api.app:app",
-        host=settings.api_host,
+        host=host,
         port=settings.api_port,
         reload=False,
     )

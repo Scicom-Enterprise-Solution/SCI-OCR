@@ -198,6 +198,16 @@ button:disabled {
   font-weight: 700;
 }
 
+.chip-muted {
+  background: #e7e4db;
+  color: #59656b;
+}
+
+.chip-ready {
+  background: #dff0e8;
+  color: #0a5148;
+}
+
 .viewer-frame {
   border-radius: 22px;
   overflow: hidden;
