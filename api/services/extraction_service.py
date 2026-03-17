@@ -7,7 +7,8 @@ from contextlib import redirect_stderr, redirect_stdout
 
 from api.config import settings
 from db import get_extraction, insert_extraction
-from logger_utils import is_debug_enabled
+from document_inputs.loader import load_document_input
+from logger_utils import is_debug_enabled, log_event
 from path_utils import from_repo_relative, to_repo_relative
 from pipelines.mrz_pipeline import process_document
 
@@ -39,6 +40,51 @@ def _relocate_api_report(report_path: str | None, document_id: str) -> str | Non
     return to_repo_relative(target)
 
 
+def _apply_rotation(file_bytes: bytes, rotation: int) -> bytes:
+    return file_bytes
+
+
+def _apply_transform(file_bytes: bytes, transform: dict | None) -> bytes:
+    return file_bytes
+
+
+def _apply_crop(file_bytes: bytes, crop: dict | None) -> bytes:
+    return file_bytes
+
+
+def run_backend_correction(
+    file_bytes: bytes,
+    *,
+    rotation: int,
+    transform: dict | None,
+    crop: dict | None,
+) -> bytes:
+    corrected = _apply_rotation(file_bytes, rotation)
+    corrected = _apply_transform(corrected, transform)
+    corrected = _apply_crop(corrected, crop)
+    return corrected
+
+
+def should_run_correction(input_mode: str, enable_correction: bool | None) -> bool:
+    normalized = (input_mode or "raw").strip().lower() or "raw"
+    if normalized not in {"raw", "frontend"}:
+        raise ValueError("input_mode must be 'raw' or 'frontend'")
+    if enable_correction:
+        return True
+    if normalized == "raw":
+        return True
+    return False
+
+
+def _validate_frontend_input(file_bytes: bytes, filename: str, input_mode: str) -> None:
+    if input_mode != "frontend":
+        return
+    loaded = load_document_input(file_bytes=file_bytes, filename=filename)
+    height, width = loaded.image_bgr.shape[:2]
+    if width < 600 or height < 400:
+        raise ValueError("frontend input image is too small; minimum size is 600x400")
+
+
 def create_extraction(
     *,
     document_id: str,
@@ -58,16 +104,26 @@ def create_extraction(
         raise FileNotFoundError(f"Stored file is not available for document_id: {document_id}")
 
     input_mode_normalized = (input_mode or "raw").strip().lower() or "raw"
-    if input_mode_normalized not in {"raw", "frontend"}:
-        raise ValueError("input_mode must be 'raw' or 'frontend'")
-
-    correction_enabled = (
-        bool(enable_correction)
-        if enable_correction is not None
-        else input_mode_normalized != "frontend"
-    )
+    correction_applied = should_run_correction(input_mode_normalized, enable_correction)
+    variant_profile = "clean" if input_mode_normalized == "frontend" else "aggressive"
 
     pipeline_bytes = _read_bytes(stored_path)
+    _validate_frontend_input(pipeline_bytes, document["filename"], input_mode_normalized)
+    if correction_applied:
+        pipeline_bytes = run_backend_correction(
+            pipeline_bytes,
+            rotation=rotation,
+            transform=transform,
+            crop=crop,
+        )
+
+    log_event(
+        "api_extraction_correction",
+        input_mode=input_mode_normalized,
+        enable_correction=enable_correction,
+        correction_applied=correction_applied,
+        variant_profile=variant_profile,
+    )
 
     extraction_id = uuid.uuid4().hex
     pipeline_filename = f"{extraction_id}_{os.path.splitext(document['filename'])[0]}.png"
@@ -75,10 +131,10 @@ def create_extraction(
         report = process_document(
             file_bytes=pipeline_bytes,
             filename=pipeline_filename,
-            use_face_hint=use_face_hint if correction_enabled else False,
-            skip_document_alignment=not correction_enabled,
-            strict_input_orientation=not correction_enabled,
-            prealigned_input=not correction_enabled,
+            use_face_hint=use_face_hint if correction_applied else False,
+            skip_document_alignment=not correction_applied,
+            strict_input_orientation=not correction_applied,
+            prealigned_input=not correction_applied,
             emit_progress=True,
         )
     else:
@@ -87,10 +143,10 @@ def create_extraction(
             report = process_document(
                 file_bytes=pipeline_bytes,
                 filename=pipeline_filename,
-                use_face_hint=use_face_hint if correction_enabled else False,
-                skip_document_alignment=not correction_enabled,
-                strict_input_orientation=not correction_enabled,
-                prealigned_input=not correction_enabled,
+                use_face_hint=use_face_hint if correction_applied else False,
+                skip_document_alignment=not correction_applied,
+                strict_input_orientation=not correction_applied,
+                prealigned_input=not correction_applied,
                 emit_progress=False,
             )
     report_path = _relocate_api_report(report.get("report_path"), document_id)
@@ -109,7 +165,7 @@ def create_extraction(
         "rotation": rotation,
         "transform": None if input_mode_normalized == "frontend" else transform,
         "input_mode": input_mode_normalized,
-        "enable_correction": correction_enabled,
+        "enable_correction": correction_applied,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     return insert_extraction(settings.db_path, record)

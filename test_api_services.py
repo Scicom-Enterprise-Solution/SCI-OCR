@@ -13,6 +13,7 @@ from api.services.extraction_service import (
     _relocate_api_report,
     create_extraction,
     fetch_extraction_report_path,
+    should_run_correction,
 )
 
 
@@ -180,6 +181,13 @@ class TestAPIReportRelocation(unittest.TestCase):
 
 
 class TestExtractionModes(unittest.TestCase):
+    def test_should_run_correction_matches_mode_rules(self) -> None:
+        self.assertTrue(should_run_correction("raw", None))
+        self.assertTrue(should_run_correction("raw", False))
+        self.assertTrue(should_run_correction("frontend", True))
+        self.assertFalse(should_run_correction("frontend", None))
+        self.assertFalse(should_run_correction("frontend", False))
+
     def test_create_extraction_frontend_mode_uses_stored_image_without_correction(self) -> None:
         with mock.patch(
             "api.services.extraction_service.fetch_document",
@@ -192,6 +200,10 @@ class TestExtractionModes(unittest.TestCase):
             "api.services.extraction_service._read_bytes",
             return_value=b"final-bytes",
         ) as read_bytes, mock.patch(
+            "api.services.extraction_service._validate_frontend_input",
+        ) as validate_frontend_input, mock.patch(
+            "api.services.extraction_service.run_backend_correction",
+        ) as run_backend_correction, mock.patch(
             "api.services.extraction_service.process_document",
             return_value={"status": "success", "mrz": {"text": {}, "parsed": {}}, "duration_ms": 1.0},
         ) as process_document, mock.patch(
@@ -212,6 +224,8 @@ class TestExtractionModes(unittest.TestCase):
             )
 
         read_bytes.assert_called_once_with("storage/uploads/doc-1.png")
+        validate_frontend_input.assert_called_once_with(b"final-bytes", "sample.jpg", "frontend")
+        run_backend_correction.assert_not_called()
         process_document.assert_called_once()
         _, kwargs = process_document.call_args
         self.assertEqual(kwargs["file_bytes"], b"final-bytes")
@@ -233,6 +247,11 @@ class TestExtractionModes(unittest.TestCase):
             "api.services.extraction_service._read_bytes",
             return_value=b"raw-bytes",
         ), mock.patch(
+            "api.services.extraction_service._validate_frontend_input",
+        ) as validate_frontend_input, mock.patch(
+            "api.services.extraction_service.run_backend_correction",
+            return_value=b"corrected-bytes",
+        ) as run_backend_correction, mock.patch(
             "api.services.extraction_service.process_document",
             return_value={"status": "success", "mrz": {"text": {}, "parsed": {}}, "duration_ms": 1.0},
         ) as process_document, mock.patch(
@@ -252,8 +271,43 @@ class TestExtractionModes(unittest.TestCase):
                 use_face_hint=True,
             )
 
+        validate_frontend_input.assert_called_once_with(b"raw-bytes", "sample.jpg", "raw")
+        run_backend_correction.assert_called_once_with(
+            b"raw-bytes",
+            rotation=0,
+            transform=None,
+            crop=None,
+        )
         _, kwargs = process_document.call_args
+        self.assertEqual(kwargs["file_bytes"], b"corrected-bytes")
         self.assertFalse(kwargs["skip_document_alignment"])
         self.assertFalse(kwargs["strict_input_orientation"])
         self.assertFalse(kwargs["prealigned_input"])
         self.assertTrue(kwargs["use_face_hint"])
+
+    def test_create_extraction_rejects_small_frontend_input(self) -> None:
+        image = np.zeros((399, 599, 3), dtype=np.uint8)
+        with mock.patch(
+            "api.services.extraction_service.fetch_document",
+            return_value={
+                "id": "doc-1",
+                "filename": "small.png",
+                "stored_path": "storage/uploads/doc-1.png",
+            },
+        ), mock.patch(
+            "api.services.extraction_service._read_bytes",
+            return_value=b"small-bytes",
+        ), mock.patch(
+            "api.services.extraction_service.load_document_input",
+            return_value=mock.Mock(image_bgr=image),
+        ):
+            with self.assertRaisesRegex(ValueError, "minimum size is 600x400"):
+                create_extraction(
+                    document_id="doc-1",
+                    input_mode="frontend",
+                    enable_correction=False,
+                    crop=None,
+                    rotation=0,
+                    transform=None,
+                    use_face_hint=False,
+                )
