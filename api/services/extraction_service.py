@@ -5,12 +5,8 @@ from datetime import datetime, timezone
 import io
 from contextlib import redirect_stderr, redirect_stdout
 
-import cv2
-import numpy as np
-
 from api.config import settings
 from db import get_extraction, insert_extraction
-from document_inputs.loader import load_document_input
 from logger_utils import is_debug_enabled
 from path_utils import from_repo_relative, to_repo_relative
 from pipelines.mrz_pipeline import process_document
@@ -18,118 +14,10 @@ from pipelines.mrz_pipeline import process_document
 from .document_service import fetch_document
 
 
-TRANSFORM_PAD_RATIO = 0.14
-
-
 def _read_bytes(path: str) -> bytes:
     resolved = from_repo_relative(path)
     with open(resolved, "rb") as f:
         return f.read()
-
-
-def _apply_rotation(image_bgr, rotation: int):
-    if rotation == 0:
-        return image_bgr
-    if rotation == 90:
-        return cv2.rotate(image_bgr, cv2.ROTATE_90_CLOCKWISE)
-    if rotation == 180:
-        return cv2.rotate(image_bgr, cv2.ROTATE_180)
-    if rotation == 270:
-        return cv2.rotate(image_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    raise ValueError("rotation must be one of 0, 90, 180, 270")
-
-
-def _apply_transform(image_bgr, transform: dict | None):
-    if not transform:
-        return image_bgr
-
-    # Frontend canvas rotation uses positive values as clockwise on screen,
-    # while OpenCV getRotationMatrix2D uses positive values as counterclockwise.
-    angle = -float(transform.get("micro_rotation", 0.0) or 0.0)
-    zoom = float(transform.get("zoom", 1.0) or 1.0)
-    offset_x = float(transform.get("offset_x", 0.0) or 0.0)
-    offset_y = float(transform.get("offset_y", 0.0) or 0.0)
-    viewport_width = int(transform.get("viewport_width") or 0)
-    viewport_height = int(transform.get("viewport_height") or 0)
-
-    if (
-        abs(angle) < 1e-6
-        and abs(zoom - 1.0) < 1e-6
-        and abs(offset_x) < 1e-6
-        and abs(offset_y) < 1e-6
-        and viewport_width <= 0
-        and viewport_height <= 0
-    ):
-        return image_bgr
-
-    h, w = image_bgr.shape[:2]
-    pad_x = int(round(w * TRANSFORM_PAD_RATIO))
-    pad_y = int(round(h * TRANSFORM_PAD_RATIO))
-    padded = cv2.copyMakeBorder(
-        image_bgr,
-        pad_y,
-        pad_y,
-        pad_x,
-        pad_x,
-        borderType=cv2.BORDER_REPLICATE,
-    )
-    padded_h, padded_w = padded.shape[:2]
-    center = (padded_w / 2.0, padded_h / 2.0)
-    matrix = cv2.getRotationMatrix2D(center, angle, zoom)
-    matrix[0, 2] += offset_x * w
-    matrix[1, 2] += offset_y * h
-
-    if viewport_width > 0 and viewport_height > 0:
-        scale = min(viewport_width / float(w), viewport_height / float(h))
-        render_center = (viewport_width / 2.0, viewport_height / 2.0)
-        render_matrix = matrix.copy()
-        render_matrix[0, 2] += render_center[0] - center[0] * scale
-        render_matrix[1, 2] += render_center[1] - center[1] * scale
-        render_matrix[0, 0] *= scale
-        render_matrix[0, 1] *= scale
-        render_matrix[1, 0] *= scale
-        render_matrix[1, 1] *= scale
-        return cv2.warpAffine(
-            padded,
-            render_matrix,
-            (viewport_width, viewport_height),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(255, 255, 255),
-        )
-
-    warped = cv2.warpAffine(
-        padded,
-        matrix,
-        (padded_w, padded_h),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_REPLICATE,
-    )
-    return warped[pad_y:pad_y + h, pad_x:pad_x + w]
-
-
-def _apply_crop(image_bgr, crop: dict | None):
-    if not crop:
-        return image_bgr
-
-    h, w = image_bgr.shape[:2]
-    x1 = int(round(crop["x"] * w))
-    y1 = int(round(crop["y"] * h))
-    x2 = int(round((crop["x"] + crop["width"]) * w))
-    y2 = int(round((crop["y"] + crop["height"]) * h))
-
-    x1 = max(0, min(x1, w - 1))
-    y1 = max(0, min(y1, h - 1))
-    x2 = max(x1 + 1, min(x2, w))
-    y2 = max(y1 + 1, min(y2, h))
-    return image_bgr[y1:y2, x1:x2]
-
-
-def _encode_png(image_bgr) -> bytes:
-    ok, data = cv2.imencode(".png", image_bgr)
-    if not ok:
-        raise RuntimeError("Failed to encode cropped image as PNG.")
-    return data.tobytes()
 
 
 def _relocate_api_report(report_path: str | None, document_id: str) -> str | None:
@@ -154,6 +42,8 @@ def _relocate_api_report(report_path: str | None, document_id: str) -> str | Non
 def create_extraction(
     *,
     document_id: str,
+    input_mode: str,
+    enable_correction: bool | None,
     crop: dict | None,
     rotation: int,
     transform: dict | None,
@@ -163,31 +53,32 @@ def create_extraction(
     if document is None:
         raise FileNotFoundError(f"Unknown document_id: {document_id}")
 
-    preview_path = document.get("preview_path")
-    if not preview_path:
-        raise FileNotFoundError(f"Preview is not available for document_id: {document_id}")
+    stored_path = document.get("stored_path")
+    if not stored_path:
+        raise FileNotFoundError(f"Stored file is not available for document_id: {document_id}")
 
-    preview_bytes = _read_bytes(preview_path)
-    loaded = load_document_input(file_bytes=preview_bytes, filename=f"{document['id']}.png")
-    working = _apply_rotation(loaded.image_bgr, rotation)
-    working = _apply_transform(working, transform)
-    # For frontend-driven extraction we skip Stage 1 alignment entirely, so it
-    # is safe to apply the fixed viewport crop after the frontend-equivalent
-    # transform has been rendered.
-    effective_crop = crop
-    working = _apply_crop(working, effective_crop)
+    input_mode_normalized = (input_mode or "raw").strip().lower() or "raw"
+    if input_mode_normalized not in {"raw", "frontend"}:
+        raise ValueError("input_mode must be 'raw' or 'frontend'")
+
+    correction_enabled = (
+        bool(enable_correction)
+        if enable_correction is not None
+        else input_mode_normalized != "frontend"
+    )
+
+    pipeline_bytes = _read_bytes(stored_path)
 
     extraction_id = uuid.uuid4().hex
     pipeline_filename = f"{extraction_id}_{os.path.splitext(document['filename'])[0]}.png"
-    pipeline_bytes = _encode_png(working)
     if is_debug_enabled():
         report = process_document(
             file_bytes=pipeline_bytes,
             filename=pipeline_filename,
-            use_face_hint=False,
-            skip_document_alignment=True,
-            strict_input_orientation=True,
-            prealigned_input=True,
+            use_face_hint=use_face_hint if correction_enabled else False,
+            skip_document_alignment=not correction_enabled,
+            strict_input_orientation=not correction_enabled,
+            prealigned_input=not correction_enabled,
             emit_progress=True,
         )
     else:
@@ -196,10 +87,10 @@ def create_extraction(
             report = process_document(
                 file_bytes=pipeline_bytes,
                 filename=pipeline_filename,
-                use_face_hint=False,
-                skip_document_alignment=True,
-                strict_input_orientation=True,
-                prealigned_input=True,
+                use_face_hint=use_face_hint if correction_enabled else False,
+                skip_document_alignment=not correction_enabled,
+                strict_input_orientation=not correction_enabled,
+                prealigned_input=not correction_enabled,
                 emit_progress=False,
             )
     report_path = _relocate_api_report(report.get("report_path"), document_id)
@@ -214,9 +105,11 @@ def create_extraction(
         "parsed": report.get("mrz", {}).get("parsed", {}),
         "report_path": report_path,
         "duration_ms": report.get("duration_ms"),
-        "crop": effective_crop,
+        "crop": None if input_mode_normalized == "frontend" else crop,
         "rotation": rotation,
-        "transform": transform,
+        "transform": None if input_mode_normalized == "frontend" else transform,
+        "input_mode": input_mode_normalized,
+        "enable_correction": correction_enabled,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     return insert_extraction(settings.db_path, record)

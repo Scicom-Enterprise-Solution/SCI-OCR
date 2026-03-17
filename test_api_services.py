@@ -3,7 +3,6 @@ import tempfile
 import unittest
 from unittest import mock
 
-import cv2
 import numpy as np
 
 from fastapi.testclient import TestClient
@@ -11,29 +10,10 @@ from fastapi.testclient import TestClient
 from api.app import app
 from api.services import document_service
 from api.services.extraction_service import (
-    _apply_crop,
-    _apply_rotation,
     _relocate_api_report,
     create_extraction,
     fetch_extraction_report_path,
 )
-
-
-class TestAPIServiceHelpers(unittest.TestCase):
-    def test_apply_crop_uses_normalized_coordinates(self) -> None:
-        image = np.zeros((100, 200, 3), dtype=np.uint8)
-        crop = {"x": 0.1, "y": 0.2, "width": 0.5, "height": 0.3}
-
-        cropped = _apply_crop(image, crop)
-
-        self.assertEqual(cropped.shape[:2], (30, 100))
-
-    def test_apply_rotation_90_changes_axes(self) -> None:
-        image = np.zeros((100, 200, 3), dtype=np.uint8)
-
-        rotated = _apply_rotation(image, 90)
-
-        self.assertEqual(rotated.shape[:2], (200, 100))
 
 
 class TestAPIRoutes(unittest.TestCase):
@@ -65,20 +45,6 @@ class TestAPIRoutes(unittest.TestCase):
         self.assertFalse(payload["deduplicated"])
         self.assertNotIn("preview_path", payload)
 
-    def test_document_preview_route_serves_preview_file(self) -> None:
-        client = TestClient(app)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            preview_path = os.path.join(tmp, "preview.png")
-            image = np.zeros((40, 80, 3), dtype=np.uint8)
-            cv2.imwrite(preview_path, image)
-
-            with mock.patch("api.routes.documents.fetch_document_preview_path", return_value=preview_path):
-                response = client.get("/api/documents/doc-123/preview")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.headers["content-type"], "image/png")
-
     def test_extraction_report_route_serves_report_file(self) -> None:
         client = TestClient(app)
 
@@ -103,7 +69,7 @@ class TestDocumentDeduplication(unittest.TestCase):
             "source_type": "image",
             "extension": ".png",
             "stored_path": "storage/uploads/sample.png",
-            "preview_path": "storage/previews/sample_preview.png",
+            "preview_path": "storage/uploads/sample.png",
             "preview_width": 800,
             "preview_height": 600,
             "created_at": "2026-03-15T00:00:00+00:00",
@@ -124,9 +90,7 @@ class TestDocumentDeduplication(unittest.TestCase):
     def test_create_document_restores_missing_artifacts_for_existing_hash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             uploads_dir = os.path.join(tmp, "uploads")
-            previews_dir = os.path.join(tmp, "previews")
             os.makedirs(uploads_dir, exist_ok=True)
-            os.makedirs(previews_dir, exist_ok=True)
 
             existing = {
                 "id": "doc-1",
@@ -135,12 +99,11 @@ class TestDocumentDeduplication(unittest.TestCase):
                 "source_type": "image",
                 "extension": ".png",
                 "stored_path": "storage/uploads/doc-1.png",
-                "preview_path": "storage/previews/doc-1.png",
+                "preview_path": "storage/uploads/doc-1.png",
                 "preview_width": 800,
                 "preview_height": 600,
                 "created_at": "2026-03-15T00:00:00+00:00",
             }
-            image = np.zeros((40, 80, 3), dtype=np.uint8)
 
             with mock.patch("api.services.document_service.ensure_storage_dirs"), \
                  mock.patch("api.services.document_service.get_document_by_hash", return_value=existing.copy()), \
@@ -148,17 +111,31 @@ class TestDocumentDeduplication(unittest.TestCase):
                  mock.patch(
                      "api.services.document_service.from_repo_relative",
                      side_effect=lambda p: os.path.join(tmp, p.replace("/", os.sep).removeprefix("storage" + os.sep)),
-                 ), \
-                 mock.patch("api.services.document_service.load_document_input") as load_input:
-                load_input.return_value = mock.Mock(image_bgr=image, filename="sample.png")
+                 ):
                 record = document_service.create_document(b"same-bytes", "sample.png")
 
             self.assertEqual(record["id"], "doc-1")
             self.assertTrue(record["deduplicated"])
             self.assertTrue(os.path.isfile(os.path.join(uploads_dir, "doc-1.png")))
-            self.assertTrue(os.path.isfile(os.path.join(previews_dir, "doc-1.png")))
-            preview = cv2.imread(os.path.join(previews_dir, "doc-1.png"))
-            self.assertIsNotNone(preview)
+            self.assertEqual(record["preview_path"], "storage/uploads/doc-1.png")
+
+    def test_create_document_uses_stored_file_as_preview_basis(self) -> None:
+        image = np.zeros((40, 80, 3), dtype=np.uint8)
+        with mock.patch("api.services.document_service.ensure_storage_dirs"), \
+             mock.patch("api.services.document_service.get_document_by_hash", return_value=None), \
+             mock.patch("api.services.document_service._write_bytes"), \
+             mock.patch("api.services.document_service.insert_document", side_effect=lambda db_path, record: record), \
+             mock.patch("api.services.document_service.load_document_input") as load_input:
+            load_input.return_value = mock.Mock(
+                image_bgr=image,
+                source_type="image",
+                extension=".png",
+            )
+            record = document_service.create_document(b"new-bytes", "sample.png")
+
+        self.assertEqual(record["preview_path"], record["stored_path"])
+        self.assertEqual(record["preview_width"], 80)
+        self.assertEqual(record["preview_height"], 40)
 
 
 class TestAPIReportRelocation(unittest.TestCase):
@@ -202,30 +179,22 @@ class TestAPIReportRelocation(unittest.TestCase):
         self.assertEqual(resolved, report_path)
 
 
-class TestExtractionUsesPreviewImage(unittest.TestCase):
-    def test_create_extraction_loads_preview_image_as_transform_basis(self) -> None:
-        image = np.zeros((40, 80, 3), dtype=np.uint8)
-
+class TestExtractionModes(unittest.TestCase):
+    def test_create_extraction_frontend_mode_uses_stored_image_without_correction(self) -> None:
         with mock.patch(
             "api.services.extraction_service.fetch_document",
             return_value={
                 "id": "doc-1",
                 "filename": "sample.jpg",
-                "preview_path": "storage/previews/doc-1.png",
+                "stored_path": "storage/uploads/doc-1.png",
             },
         ), mock.patch(
             "api.services.extraction_service._read_bytes",
-            return_value=b"png-bytes",
+            return_value=b"final-bytes",
         ) as read_bytes, mock.patch(
-            "api.services.extraction_service.load_document_input",
-            return_value=mock.Mock(image_bgr=image),
-        ) as load_document_input, mock.patch(
-            "api.services.extraction_service._encode_png",
-            return_value=b"encoded",
-        ), mock.patch(
             "api.services.extraction_service.process_document",
             return_value={"status": "success", "mrz": {"text": {}, "parsed": {}}, "duration_ms": 1.0},
-        ), mock.patch(
+        ) as process_document, mock.patch(
             "api.services.extraction_service.insert_extraction",
             side_effect=lambda db_path, record: record,
         ), mock.patch(
@@ -234,12 +203,57 @@ class TestExtractionUsesPreviewImage(unittest.TestCase):
         ):
             record = create_extraction(
                 document_id="doc-1",
+                input_mode="frontend",
+                enable_correction=False,
                 crop=None,
                 rotation=0,
                 transform=None,
                 use_face_hint=False,
             )
 
-        read_bytes.assert_called_once_with("storage/previews/doc-1.png")
-        load_document_input.assert_called_once_with(file_bytes=b"png-bytes", filename="doc-1.png")
+        read_bytes.assert_called_once_with("storage/uploads/doc-1.png")
+        process_document.assert_called_once()
+        _, kwargs = process_document.call_args
+        self.assertEqual(kwargs["file_bytes"], b"final-bytes")
+        self.assertTrue(kwargs["skip_document_alignment"])
+        self.assertTrue(kwargs["strict_input_orientation"])
+        self.assertTrue(kwargs["prealigned_input"])
+        self.assertFalse(kwargs["use_face_hint"])
         self.assertEqual(record["document_id"], "doc-1")
+
+    def test_create_extraction_raw_mode_runs_correction_by_default(self) -> None:
+        with mock.patch(
+            "api.services.extraction_service.fetch_document",
+            return_value={
+                "id": "doc-1",
+                "filename": "sample.jpg",
+                "stored_path": "storage/uploads/doc-1.jpg",
+            },
+        ), mock.patch(
+            "api.services.extraction_service._read_bytes",
+            return_value=b"raw-bytes",
+        ), mock.patch(
+            "api.services.extraction_service.process_document",
+            return_value={"status": "success", "mrz": {"text": {}, "parsed": {}}, "duration_ms": 1.0},
+        ) as process_document, mock.patch(
+            "api.services.extraction_service.insert_extraction",
+            side_effect=lambda db_path, record: record,
+        ), mock.patch(
+            "api.services.extraction_service._relocate_api_report",
+            return_value=None,
+        ):
+            create_extraction(
+                document_id="doc-1",
+                input_mode="raw",
+                enable_correction=None,
+                crop=None,
+                rotation=0,
+                transform=None,
+                use_face_hint=True,
+            )
+
+        _, kwargs = process_document.call_args
+        self.assertFalse(kwargs["skip_document_alignment"])
+        self.assertFalse(kwargs["strict_input_orientation"])
+        self.assertFalse(kwargs["prealigned_input"])
+        self.assertTrue(kwargs["use_face_hint"])

@@ -21,6 +21,8 @@ class ImageTransform(BaseModel):
 
 class ExtractionRequest(BaseModel):
     document_id: str
+    input_mode: str = Field(default="raw")
+    enable_correction: bool | None = None
     crop: CropBox | None = None
     rotation: int = Field(default=0)
     transform: ImageTransform | None = None

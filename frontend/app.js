@@ -23,7 +23,6 @@ const els = {
   rotateRight: document.querySelector("#rotate-right"),
   resetAdjust: document.querySelector("#reset-adjust"),
   extractButton: document.querySelector("#extract-button"),
-  useFaceHint: document.querySelector("#use-face-hint"),
   microRotate: document.querySelector("#micro-rotate"),
   zoomOut: document.querySelector("#zoom-out"),
   zoomIn: document.querySelector("#zoom-in"),
@@ -103,10 +102,6 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-function getPreviewUrl(documentId) {
-  return `/api/documents/${documentId}/preview`;
-}
-
 function getWorkingFrameCrop() {
   const width = state.canvasBounds.width;
   const height = state.canvasBounds.height;
@@ -181,17 +176,9 @@ function getPaddedPreviewSource() {
 function buildExtractionPayload() {
   return {
     document_id: state.documentId,
-    rotation: state.rotation,
-    transform: {
-      micro_rotation: Number(state.microRotation.toFixed(3)),
-      zoom: Number(state.zoom.toFixed(3)),
-      offset_x: Number(state.offsetX.toFixed(6)),
-      offset_y: Number(state.offsetY.toFixed(6)),
-      viewport_width: Math.max(1, Math.round(state.canvasBounds.width || 0)),
-      viewport_height: Math.max(1, Math.round(state.canvasBounds.height || 0)),
-    },
-    crop: getWorkingFrameCrop(),
-    use_face_hint: Boolean(els.useFaceHint.checked),
+    input_mode: "frontend",
+    enable_correction: false,
+    use_face_hint: false,
   };
 }
 
@@ -437,7 +424,7 @@ function renderCropAnalysis() {
 }
 
 function updateControls() {
-  const hasDocument = Boolean(state.documentId && state.previewImage);
+  const hasDocument = Boolean(state.previewImage);
   els.rotateLeft.disabled = !hasDocument || state.isBusy;
   els.rotateRight.disabled = !hasDocument || state.isBusy;
   els.resetAdjust.disabled = !hasDocument || state.isBusy;
@@ -462,13 +449,13 @@ function updateControls() {
 function updateDocumentSummary() {
   if (!state.upload) {
     els.docName.textContent = "No document";
-    els.docMeta.textContent = "Upload a file to begin.";
+    els.docMeta.textContent = "Choose a file to begin. Geometry stays local until extraction.";
     return;
   }
 
   els.docName.textContent = state.upload.filename;
   els.docMeta.textContent =
-    `${state.upload.source_type} | ${state.upload.preview_width}x${state.upload.preview_height} | deduplicated=${state.upload.deduplicated}`;
+    `${state.upload.source_type} | ${state.upload.preview_width}x${state.upload.preview_height}`;
 }
 
 function resetAdjustments() {
@@ -652,6 +639,131 @@ function renderCanvas() {
   renderCanvasWithCanvas();
 }
 
+function renderFinalCanvasWithCanvas(targetCanvas) {
+  const targetWidth = Math.max(320, Math.round(els.viewerFrame.clientWidth - 2));
+  const targetHeight = Math.max(240, Math.round(els.viewerFrame.clientHeight - 2));
+  const targetCtx = targetCanvas.getContext("2d");
+  const source = getPaddedPreviewSource();
+  const rotated = getRotatedImageSize();
+  const scale = Math.min(targetWidth / rotated.width, targetHeight / rotated.height);
+
+  targetCanvas.width = targetWidth;
+  targetCanvas.height = targetHeight;
+  targetCtx.clearRect(0, 0, targetWidth, targetHeight);
+  targetCtx.fillStyle = "#ffffff";
+  targetCtx.fillRect(0, 0, targetWidth, targetHeight);
+  targetCtx.imageSmoothingEnabled = true;
+  targetCtx.imageSmoothingQuality = "high";
+  targetCtx.save();
+  targetCtx.translate(targetWidth / 2, targetHeight / 2);
+  targetCtx.scale(scale, scale);
+  targetCtx.translate(state.offsetX * rotated.width, state.offsetY * rotated.height);
+  targetCtx.rotate((state.microRotation * Math.PI) / 180);
+  targetCtx.scale(state.zoom, state.zoom);
+
+  if (state.rotation === 0) {
+    targetCtx.drawImage(source, -source.width / 2, -source.height / 2);
+  } else if (state.rotation === 90) {
+    targetCtx.rotate(Math.PI / 2);
+    targetCtx.drawImage(source, -source.width / 2, -source.height / 2);
+  } else if (state.rotation === 180) {
+    targetCtx.rotate(Math.PI);
+    targetCtx.drawImage(source, -source.width / 2, -source.height / 2);
+  } else if (state.rotation === 270) {
+    targetCtx.rotate(-Math.PI / 2);
+    targetCtx.drawImage(source, -source.width / 2, -source.height / 2);
+  }
+  targetCtx.restore();
+}
+
+function renderFinalCanvasWithOpenCv(targetCanvas) {
+  const cv = window.cv;
+  const source = getPreviewMat();
+  if (!source) {
+    renderFinalCanvasWithCanvas(targetCanvas);
+    return;
+  }
+
+  const rotatedBase = new cv.Mat();
+  if (state.rotation === 90) {
+    cv.rotate(source, rotatedBase, cv.ROTATE_90_CLOCKWISE);
+  } else if (state.rotation === 180) {
+    cv.rotate(source, rotatedBase, cv.ROTATE_180);
+  } else if (state.rotation === 270) {
+    cv.rotate(source, rotatedBase, cv.ROTATE_90_COUNTERCLOCKWISE);
+  } else {
+    source.copyTo(rotatedBase);
+  }
+
+  const targetWidth = Math.max(320, Math.round(els.viewerFrame.clientWidth - 2));
+  const targetHeight = Math.max(240, Math.round(els.viewerFrame.clientHeight - 2));
+  const h = rotatedBase.rows;
+  const w = rotatedBase.cols;
+  const padX = Math.round(w * TRANSFORM_PAD_RATIO);
+  const padY = Math.round(h * TRANSFORM_PAD_RATIO);
+  const padded = new cv.Mat();
+  cv.copyMakeBorder(rotatedBase, padded, padY, padY, padX, padX, cv.BORDER_REPLICATE);
+
+  const centerX = padded.cols / 2.0;
+  const centerY = padded.rows / 2.0;
+  const matrix = cv.getRotationMatrix2D(
+    new cv.Point(centerX, centerY),
+    -state.microRotation,
+    state.zoom
+  );
+  matrix.doublePtr(0, 2)[0] += state.offsetX * w;
+  matrix.doublePtr(1, 2)[0] += state.offsetY * h;
+
+  const scale = Math.min(targetWidth / w, targetHeight / h);
+  matrix.doublePtr(0, 0)[0] *= scale;
+  matrix.doublePtr(0, 1)[0] *= scale;
+  matrix.doublePtr(1, 0)[0] *= scale;
+  matrix.doublePtr(1, 1)[0] *= scale;
+  matrix.doublePtr(0, 2)[0] += (targetWidth / 2.0) - (centerX * scale);
+  matrix.doublePtr(1, 2)[0] += (targetHeight / 2.0) - (centerY * scale);
+
+  const rendered = new cv.Mat();
+  cv.warpAffine(
+    padded,
+    rendered,
+    matrix,
+    new cv.Size(targetWidth, targetHeight),
+    cv.INTER_LINEAR,
+    cv.BORDER_CONSTANT,
+    new cv.Scalar(255, 255, 255, 255)
+  );
+  targetCanvas.width = targetWidth;
+  targetCanvas.height = targetHeight;
+  cv.imshow(targetCanvas, rendered);
+
+  rendered.delete();
+  matrix.delete();
+  padded.delete();
+  rotatedBase.delete();
+}
+
+function renderFinalCanvas() {
+  const targetCanvas = document.createElement("canvas");
+  if (window.cv && cvState.ready) {
+    renderFinalCanvasWithOpenCv(targetCanvas);
+  } else {
+    renderFinalCanvasWithCanvas(targetCanvas);
+  }
+  return targetCanvas;
+}
+
+async function canvasToPngBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+        return;
+      }
+      reject(new Error("Failed to encode frontend-rendered image."));
+    }, "image/png");
+  });
+}
+
 function getCanvasPointer(event) {
   const rect = els.canvas.getBoundingClientRect();
   const x = clamp(event.clientX - rect.left, 0, rect.width);
@@ -662,12 +774,17 @@ function getCanvasPointer(event) {
   };
 }
 
-async function loadPreviewImage(documentId) {
+async function loadLocalImage(file) {
   const image = new Image();
   image.decoding = "async";
-  image.src = `${getPreviewUrl(documentId)}?t=${Date.now()}`;
-  await image.decode();
-  return image;
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    image.src = objectUrl;
+    await image.decode();
+    return image;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 async function handleUpload(event) {
@@ -680,24 +797,20 @@ async function handleUpload(event) {
 
   state.isBusy = true;
   updateControls();
-  setStatus(`Uploading ${file.name} ...`);
+  setStatus(`Loading ${file.name} locally ...`);
 
   try {
-    const formData = new FormData();
-    formData.append("file", file);
+    const image = await loadLocalImage(file);
+    const payload = {
+      filename: file.name,
+      source_type: "local_image",
+      extension: file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).toLowerCase() : "",
+      preview_width: image.width,
+      preview_height: image.height,
+    };
 
-    const response = await fetch("/api/uploads", {
-      method: "POST",
-      body: formData,
-    });
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.detail || "Upload failed.");
-    }
-
-    const image = await loadPreviewImage(payload.document_id);
     state.upload = payload;
-    state.documentId = payload.document_id;
+    state.documentId = null;
     state.previewImage = image;
     clearPreviewMats();
     state.rotation = 0;
@@ -714,9 +827,9 @@ async function handleUpload(event) {
     renderCropAnalysis();
     updateDocumentSummary();
     renderCanvas();
-    setStatus(`Uploaded ${payload.filename}. Adjust rotation/crop, then run extraction.`);
+    setStatus(`Loaded ${payload.filename} locally. Adjust it, then run extraction.`);
   } catch (error) {
-    setStatus(error.message || "Upload failed.", true);
+    setStatus(error.message || "Local load failed.", true);
   } finally {
     state.isBusy = false;
     updateControls();
@@ -736,16 +849,37 @@ function rotate(delta) {
 }
 
 async function handleExtraction() {
-  if (!state.documentId) {
+  if (!state.previewImage) {
     return;
   }
 
   state.isBusy = true;
   updateControls();
-  setStatus("Running extraction ...");
+  setStatus("Rendering final frontend image ...");
 
   try {
+    const finalCanvas = renderFinalCanvas();
+    const blob = await canvasToPngBlob(finalCanvas);
+    const uploadName = `${(state.upload?.filename || "document").replace(/\.[^.]+$/, "")}_frontend.png`;
+    const formData = new FormData();
+    formData.append("file", blob, uploadName);
+
+    setStatus("Uploading frontend-rendered image ...");
+    const uploadResponse = await fetch("/api/uploads", {
+      method: "POST",
+      body: formData,
+    });
+    const uploadPayload = await uploadResponse.json();
+    if (!uploadResponse.ok) {
+      throw new Error(uploadPayload.detail || "Frontend image upload failed.");
+    }
+
+    state.documentId = uploadPayload.document_id;
+    els.uploadJson.textContent = formatJson(uploadPayload);
+    updateControls();
+
     const payload = buildExtractionPayload();
+    setStatus("Running extraction on frontend-authored image ...");
     const response = await fetch("/api/extractions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -847,7 +981,6 @@ function init() {
   els.rotateRight.addEventListener("click", () => rotate(90));
   els.resetAdjust.addEventListener("click", resetAdjustments);
   els.extractButton.addEventListener("click", handleExtraction);
-  els.useFaceHint.addEventListener("change", updatePayloadView);
   els.microRotate.addEventListener("input", () => {
     state.microRotation = Number(els.microRotate.value);
     renderCanvas();

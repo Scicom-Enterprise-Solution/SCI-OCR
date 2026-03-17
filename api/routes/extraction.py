@@ -14,6 +14,8 @@ def extract_document(request: ExtractionRequest) -> ExtractionResponse:
     log_event(
         "api_extraction_started",
         document_id=request.document_id,
+        input_mode=request.input_mode,
+        enable_correction=request.enable_correction,
         has_crop=request.crop is not None,
         rotation=request.rotation,
         use_face_hint=request.use_face_hint,
@@ -21,6 +23,8 @@ def extract_document(request: ExtractionRequest) -> ExtractionResponse:
     try:
         record = create_extraction(
             document_id=request.document_id,
+            input_mode=request.input_mode,
+            enable_correction=request.enable_correction,
             crop=request.crop.model_dump() if request.crop else None,
             rotation=request.rotation,
             transform=request.transform.model_dump() if request.transform else None,

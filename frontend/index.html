@@ -13,17 +13,17 @@
         <p class="eyebrow">TD3 Passport MRZ</p>
         <h1>Upload, align, extract.</h1>
         <p class="lede">
-          Plain HTML and JavaScript frontend for the MRZ API. Adjust rotation, zoom, and page
-          position before extraction while keeping the upload flow separate.
+          Plain HTML and JavaScript frontend for the MRZ API. Load a local image, align it in the
+          browser, then send the final rendered image to the backend for MRZ extraction.
         </p>
       </div>
       <form id="upload-form" class="upload-panel">
         <label class="file-drop" for="file-input">
           <input id="file-input" name="file" type="file" accept="image/*,.pdf" required>
           <span class="file-drop-label">Choose passport image or PDF</span>
-          <span class="file-drop-hint">Upload first, then adjust preview before extraction.</span>
+          <span class="file-drop-hint">Load locally first. The backend only receives the final rendered image.</span>
         </label>
-        <button id="upload-button" type="submit">Upload Document</button>
+        <button id="upload-button" type="submit">Load Local Document</button>
       </form>
     </section>
 
@@ -35,10 +35,6 @@
           <button id="reset-adjust" type="button" disabled>Reset Adjust</button>
         </div>
         <div class="toolbar-group">
-          <label class="toggle">
-            <input id="use-face-hint" type="checkbox">
-            <span>Use face hint</span>
-          </label>
           <button id="extract-button" type="button" disabled>Run Extraction</button>
         </div>
       </div>
@@ -48,7 +44,7 @@
           <div class="viewer-meta">
             <div>
               <strong id="doc-name">No document</strong>
-              <p id="doc-meta">Upload a file to begin.</p>
+              <p id="doc-meta">Choose a file to begin. Geometry stays local until extraction.</p>
             </div>
             <div class="chip-row">
               <span id="doc-id-chip" class="chip">document: -</span>
@@ -100,8 +96,8 @@
             </summary>
             <pre id="request-json">{
   "document_id": null,
-  "rotation": 0,
-  "crop": null,
+  "input_mode": "frontend",
+  "enable_correction": false,
   "use_face_hint": false
 }</pre>
           </details>
