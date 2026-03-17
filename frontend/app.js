@@ -181,11 +181,22 @@ function computeViewBaseScale() {
   return Math.min(viewSize.width / imageSize.width, viewSize.height / imageSize.height);
 }
 
+function getImageOffsetPixels() {
+  if (!state.previewImage) {
+    return { x: 0, y: 0 };
+  }
+  return {
+    x: state.offsetX * state.previewImage.width,
+    y: state.offsetY * state.previewImage.height,
+  };
+}
+
 function renderImage(targetCtx, canvas, baseScale, backgroundFill) {
   const image = state.previewImage;
   if (!image) {
     return;
   }
+  const offsetPixels = getImageOffsetPixels();
 
   targetCtx.clearRect(0, 0, canvas.width, canvas.height);
   targetCtx.fillStyle = backgroundFill;
@@ -198,8 +209,8 @@ function renderImage(targetCtx, canvas, baseScale, backgroundFill) {
   targetCtx.scale(baseScale * state.scale, baseScale * state.scale);
   targetCtx.drawImage(
     image,
-    -image.width / 2 + state.offsetX,
-    -image.height / 2 + state.offsetY,
+    -image.width / 2 + offsetPixels.x,
+    -image.height / 2 + offsetPixels.y,
     image.width,
     image.height,
   );
@@ -221,16 +232,17 @@ function getTransformedImageBounds() {
 
   const image = state.previewImage;
   const scale = state.viewBaseScale * state.scale;
+  const offsetPixels = getImageOffsetPixels();
   const radians = (state.rotation * Math.PI) / 180;
   const cos = Math.cos(radians);
   const sin = Math.sin(radians);
   const cx = state.viewSize.width / 2;
   const cy = state.viewSize.height / 2;
   const corners = [
-    [-image.width / 2 + state.offsetX, -image.height / 2 + state.offsetY],
-    [image.width / 2 + state.offsetX, -image.height / 2 + state.offsetY],
-    [image.width / 2 + state.offsetX, image.height / 2 + state.offsetY],
-    [-image.width / 2 + state.offsetX, image.height / 2 + state.offsetY],
+    [-image.width / 2 + offsetPixels.x, -image.height / 2 + offsetPixels.y],
+    [image.width / 2 + offsetPixels.x, -image.height / 2 + offsetPixels.y],
+    [image.width / 2 + offsetPixels.x, image.height / 2 + offsetPixels.y],
+    [-image.width / 2 + offsetPixels.x, image.height / 2 + offsetPixels.y],
   ].map(([x, y]) => ({
     x: cx + ((x * cos) - (y * sin)) * scale,
     y: cy + ((x * sin) + (y * cos)) * scale,
@@ -355,7 +367,11 @@ function drawExportCanvas() {
   }
   els.exportCanvas.width = state.previewImage.width;
   els.exportCanvas.height = state.previewImage.height;
-  renderImage(exportCtx, els.exportCanvas, 1, "#ffffff");
+  const scaleUp = Math.min(
+    els.exportCanvas.width / state.viewSize.width,
+    els.exportCanvas.height / state.viewSize.height,
+  );
+  renderImage(exportCtx, els.exportCanvas, state.viewBaseScale * scaleUp, "#ffffff");
 }
 
 function dataUrlToBlob(dataUrl) {
@@ -504,7 +520,7 @@ function buildAdjustmentCards() {
       items: [
         `Rotation: ${state.rotation} degrees`,
         `Scale: ${state.scale.toFixed(2)}x`,
-        `Offset: x=${state.offsetX.toFixed(1)}, y=${state.offsetY.toFixed(1)}`,
+        `Offset: x=${state.offsetX.toFixed(3)}, y=${state.offsetY.toFixed(3)}`,
       ],
       tone: "analysis-good",
     },
@@ -576,12 +592,18 @@ function handlePointerMove(event) {
   const next = getCanvasPointer(event);
   const dx = next.x - state.dragOrigin.x;
   const dy = next.y - state.dragOrigin.y;
-  const renderScale = state.viewBaseScale * state.scale;
-  if (renderScale > 0) {
-    state.offsetX += dx / renderScale;
-    state.offsetY += dy / renderScale;
+  const effectiveScale = state.viewBaseScale * state.scale;
+  const radians = (state.rotation * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  if (effectiveScale > 0 && state.previewImage) {
+    const localDx = ((dx * cos) + (dy * sin)) / effectiveScale;
+    const localDy = ((-dx * sin) + (dy * cos)) / effectiveScale;
+    state.offsetX += localDx / state.previewImage.width;
+    state.offsetY += localDy / state.previewImage.height;
   }
   state.dragOrigin = next;
+  drawViewCanvas();
   renderCropAnalysis();
   setStatus(getGuideStatus());
 }
