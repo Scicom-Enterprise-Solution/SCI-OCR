@@ -1,0 +1,33 @@
+services:
+  mrz-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: mrz-api-dev
+    working_dir: /workspace
+    command: python scripts/run_api_dev.py
+    env_file:
+      - .env
+    ports:
+      - "3000:3000"
+    environment:
+      API_DEV_HOST: 0.0.0.0
+      API_HOST: 0.0.0.0
+      API_PORT: 3000
+      API_STORAGE_DIR: /workspace/storage
+      API_DB_PATH: /workspace/storage/api.sqlite3
+      OCR_BACKEND: paddle
+      PADDLEOCR_USE_GPU: "true"
+      PADDLE_PDX_CACHE_HOME: /workspace/.paddlex
+      TESSERACT_LANG: ocrb
+      TESSDATA_PREFIX: /workspace/docker/tessdata
+      PYTHONPATH: /workspace
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - .:/workspace
+      - ./docker/tessdata:/workspace/docker/tessdata
+    gpus: all
+    restart: unless-stopped
+    stdin_open: true
+    tty: true

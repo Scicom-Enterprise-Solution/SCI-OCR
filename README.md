@@ -228,6 +228,75 @@ This covers:
 
 The script now uses the project Python for JSON parsing and does not require `jq`.
 
+## Docker Dev Workflow
+
+The repo now includes a dev-oriented Docker setup that keeps the code editable on the host while the API runs inside the container.
+
+Key properties:
+
+- source code stays on the host filesystem
+- the container mounts the repo with `.:/workspace`
+- edits made in your normal editor are visible immediately inside the container
+- runtime storage stays under the mounted `storage/` directory
+- backend API behavior is unchanged
+- the image now targets NVIDIA CUDA `12.8` userspace instead of a generic Python base
+- the compose service loads the repo `.env` so container defaults stay aligned with local project settings
+
+Files:
+
+- [Dockerfile.dev](/mnt/d/dev/python/mrz/Dockerfile.dev)
+- [docker-compose.yml](/mnt/d/dev/python/mrz/docker-compose.yml)
+- [.dockerignore](/mnt/d/dev/python/mrz/.dockerignore)
+- [docker/tessdata/.gitkeep](/mnt/d/dev/python/mrz/docker/tessdata/.gitkeep)
+
+Run:
+
+```bash
+docker compose up --build
+```
+
+Then open:
+
+- [http://127.0.0.1:3000/docs](http://127.0.0.1:3000/docs)
+- [http://127.0.0.1:3000/frontend/](http://127.0.0.1:3000/frontend/)
+
+Useful commands:
+
+```bash
+docker compose up --build
+docker compose up
+docker compose down
+docker compose exec mrz-api python scripts/api_client.py samples/11.png --input-mode raw
+```
+
+Notes:
+
+- This is a development container, not a production image.
+- It uses `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04`.
+- It installs Tesseract, Python, and the GPU Paddle stack inside the image.
+- It does not reuse the host `.venv`.
+- The repo remains editable outside Docker because the working tree is bind-mounted.
+- The host NVIDIA driver is not containerized. An "exact replica" is only possible up to CUDA userspace and package stack; the host driver still comes from the server.
+- For GPU access, Docker must have NVIDIA Container Toolkit available on the host.
+
+OCR-B and current Paddle models:
+
+- The compose service reuses the repo-local Paddle cache through:
+  - `PADDLE_PDX_CACHE_HOME=/workspace/.paddlex`
+- The current project cache already includes models such as:
+  - `PP-OCRv5_server_det`
+  - `en_PP-OCRv5_mobile_rec`
+- The compose service is also wired for repo-local Tesseract OCR-B data through:
+  - `TESSDATA_PREFIX=/workspace/docker/tessdata`
+  - `TESSERACT_LANG=ocrb`
+- To mirror the current host setup more closely, place `ocrb.traineddata` in:
+
+```text
+docker/tessdata/ocrb.traineddata
+```
+
+This keeps OCR-B under versioned project structure instead of depending on a mutable container path.
+
 ## Frontend Demo Workbench
 
 The current frontend is a pure HTML + JavaScript document-capture workbench served from `/frontend`.
