@@ -165,6 +165,7 @@ Frontend-authoritative flow:
 - the frontend uploads that final image through `POST /api/uploads`
 - the backend does not fetch or serve preview images for frontend editing
 - the backend does not replay frontend transform/crop in `frontend` mode
+- in `frontend` mode, geometry is final and authoritative; the backend must not accept or replay `crop`, `transform`, or `rotation` metadata
 
 CLI/API manual flow:
 

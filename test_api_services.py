@@ -236,6 +236,80 @@ class TestExtractionModes(unittest.TestCase):
         self.assertTrue(kwargs["prealigned_input"])
         self.assertFalse(kwargs["use_face_hint"])
         self.assertEqual(record["document_id"], "doc-1")
+        self.assertFalse(record["enable_correction"])
+        self.assertFalse(record["correction_applied"])
+        self.assertEqual(record["rotation"], 0)
+        self.assertIsNone(record["transform"])
+        self.assertIsNone(record["crop"])
+
+    def test_create_extraction_frontend_mode_rejects_crop(self) -> None:
+        with mock.patch(
+            "api.services.extraction_service.fetch_document",
+            return_value={
+                "id": "doc-1",
+                "filename": "sample.jpg",
+                "stored_path": "storage/uploads/doc-1.png",
+            },
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "frontend mode does not accept crop/transform/rotation; send final prepared image instead",
+            ):
+                create_extraction(
+                    document_id="doc-1",
+                    input_mode="frontend",
+                    enable_correction=False,
+                    crop={"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+                    rotation=0,
+                    transform=None,
+                    use_face_hint=False,
+                )
+
+    def test_create_extraction_frontend_mode_rejects_transform(self) -> None:
+        with mock.patch(
+            "api.services.extraction_service.fetch_document",
+            return_value={
+                "id": "doc-1",
+                "filename": "sample.jpg",
+                "stored_path": "storage/uploads/doc-1.png",
+            },
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "frontend mode does not accept crop/transform/rotation; send final prepared image instead",
+            ):
+                create_extraction(
+                    document_id="doc-1",
+                    input_mode="frontend",
+                    enable_correction=False,
+                    crop=None,
+                    rotation=0,
+                    transform={"micro_rotation": 1.0},
+                    use_face_hint=False,
+                )
+
+    def test_create_extraction_frontend_mode_rejects_nonzero_rotation(self) -> None:
+        with mock.patch(
+            "api.services.extraction_service.fetch_document",
+            return_value={
+                "id": "doc-1",
+                "filename": "sample.jpg",
+                "stored_path": "storage/uploads/doc-1.png",
+            },
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "frontend mode does not accept crop/transform/rotation; send final prepared image instead",
+            ):
+                create_extraction(
+                    document_id="doc-1",
+                    input_mode="frontend",
+                    enable_correction=False,
+                    crop=None,
+                    rotation=90,
+                    transform=None,
+                    use_face_hint=False,
+                )
 
     def test_create_extraction_raw_mode_runs_correction_by_default(self) -> None:
         with mock.patch(
@@ -263,7 +337,7 @@ class TestExtractionModes(unittest.TestCase):
             "api.services.extraction_service._relocate_api_report",
             return_value=None,
         ):
-            create_extraction(
+            record = create_extraction(
                 document_id="doc-1",
                 input_mode="raw",
                 enable_correction=None,
@@ -287,6 +361,51 @@ class TestExtractionModes(unittest.TestCase):
         self.assertFalse(kwargs["strict_input_orientation"])
         self.assertFalse(kwargs["prealigned_input"])
         self.assertTrue(kwargs["use_face_hint"])
+        self.assertIsNone(record["enable_correction"])
+        self.assertTrue(record["correction_applied"])
+        self.assertEqual(record["rotation"], 0)
+        self.assertIsNone(record["transform"])
+        self.assertIsNone(record["crop"])
+
+    def test_create_extraction_raw_mode_accepts_correction_inputs(self) -> None:
+        with mock.patch(
+            "api.services.extraction_service.fetch_document",
+            return_value={
+                "id": "doc-1",
+                "filename": "sample.jpg",
+                "stored_path": "storage/uploads/doc-1.jpg",
+            },
+        ), mock.patch(
+            "api.services.extraction_service._read_bytes",
+            return_value=b"raw-bytes",
+        ), mock.patch(
+            "api.services.extraction_service._validate_frontend_input",
+        ), mock.patch(
+            "api.services.extraction_service.run_backend_correction",
+            return_value=b"corrected-bytes",
+        ), mock.patch(
+            "api.services.extraction_service.process_document",
+            return_value={"status": "success", "mrz": {"text": {}, "parsed": {}}, "duration_ms": 1.0},
+        ), mock.patch(
+            "api.services.extraction_service.insert_extraction",
+            side_effect=lambda db_path, record: record,
+        ), mock.patch(
+            "api.services.extraction_service._relocate_api_report",
+            return_value=None,
+        ):
+            record = create_extraction(
+                document_id="doc-1",
+                input_mode="raw",
+                enable_correction=True,
+                crop={"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+                rotation=90,
+                transform={"micro_rotation": 1.0},
+                use_face_hint=False,
+            )
+
+        self.assertEqual(record["rotation"], 90)
+        self.assertEqual(record["transform"], {"micro_rotation": 1.0})
+        self.assertEqual(record["crop"], {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5})
 
     def test_create_extraction_rejects_small_frontend_input(self) -> None:
         image = np.zeros((399, 599, 3), dtype=np.uint8)

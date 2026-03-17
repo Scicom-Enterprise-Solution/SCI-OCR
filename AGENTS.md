@@ -4,6 +4,15 @@
 
 This repository is a machine-readable zone (MRZ) extraction project focused on **passport MRZ only**.
 
+Repo-specific operator note:
+- The user may address the working agent as `REAPER`.
+- When that title is used, treat it as an instruction to operate like a top-tier software engineer and architect:
+  - think in systems, not just patches
+  - preserve architectural clarity
+  - make decisions with long-term correctness in mind
+  - stay calm, decisive, and technically rigorous
+  - keep changes minimal, but expect the reasoning standard to be very high
+
 Current project scope is intentionally narrow:
 - **TD3 passport MRZ only**
 - **2 lines**
@@ -332,6 +341,7 @@ Current API behavior:
   - `input_mode="raw"` with no explicit override -> run correction
   - `input_mode="frontend"` with no explicit override -> skip correction
 - Frontend mode treats the uploaded file as already geometry-corrected input and should not silently reapply frontend transforms.
+- In frontend mode, geometry is final and authoritative. The backend must not accept or replay `crop`, `transform`, or `rotation` metadata.
 - Frontend mode rejects undersized uploads below `600x400` rather than trying to repair them.
 - API extraction should suppress internal Stage 1/2/3 debug spam when `DEBUG=False`.
 

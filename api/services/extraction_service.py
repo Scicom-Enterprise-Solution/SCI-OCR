@@ -183,6 +183,22 @@ def _validate_frontend_input(file_bytes: bytes, filename: str, input_mode: str) 
         raise ValueError("frontend input image is too small; minimum size is 600x400")
 
 
+def _enforce_frontend_geometry_boundary(
+    input_mode: str,
+    *,
+    crop: dict | None,
+    transform: dict | None,
+    rotation: int,
+) -> tuple[dict | None, dict | None, int]:
+    if input_mode != "frontend":
+        return crop, transform, rotation
+    if crop is not None or transform is not None or rotation != 0:
+        raise ValueError(
+            "frontend mode does not accept crop/transform/rotation; send final prepared image instead"
+        )
+    return None, None, 0
+
+
 def create_extraction(
     *,
     document_id: str,
@@ -202,6 +218,12 @@ def create_extraction(
         raise FileNotFoundError(f"Stored file is not available for document_id: {document_id}")
 
     input_mode_normalized = (input_mode or "raw").strip().lower() or "raw"
+    crop, transform, rotation = _enforce_frontend_geometry_boundary(
+        input_mode_normalized,
+        crop=crop,
+        transform=transform,
+        rotation=rotation,
+    )
     correction_applied = should_run_correction(input_mode_normalized, enable_correction)
     variant_profile = "clean" if input_mode_normalized == "frontend" else "aggressive"
 
@@ -264,7 +286,8 @@ def create_extraction(
         "rotation": rotation,
         "transform": None if input_mode_normalized == "frontend" else transform,
         "input_mode": input_mode_normalized,
-        "enable_correction": correction_applied,
+        "enable_correction": enable_correction,
+        "correction_applied": correction_applied,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     return insert_extraction(settings.db_path, record)
