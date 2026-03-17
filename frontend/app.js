@@ -2,17 +2,18 @@ const state = {
   upload: null,
   documentId: null,
   previewImage: null,
+  scale: 1,
   rotation: 0,
-  microRotation: 0,
-  zoom: 1,
   offsetX: 0,
   offsetY: 0,
-  dragStart: null,
-  dragCurrent: null,
-  canvasScale: 1,
-  canvasBounds: { x: 0, y: 0, width: 0, height: 0 },
+  dragPointer: null,
+  dragOrigin: null,
+  viewBaseScale: 1,
+  viewSize: { width: 720, height: 480 },
   isBusy: false,
-  previewMat: null,
+  extractionResult: null,
+  animationFrameId: null,
+  animationStartMs: 0,
 };
 
 const els = {
@@ -23,13 +24,11 @@ const els = {
   rotateRight: document.querySelector("#rotate-right"),
   resetAdjust: document.querySelector("#reset-adjust"),
   extractButton: document.querySelector("#extract-button"),
-  microRotate: document.querySelector("#micro-rotate"),
   zoomOut: document.querySelector("#zoom-out"),
   zoomIn: document.querySelector("#zoom-in"),
   zoomRange: document.querySelector("#zoom-range"),
-  offsetXRange: document.querySelector("#offset-x-range"),
-  offsetYRange: document.querySelector("#offset-y-range"),
   canvas: document.querySelector("#preview-canvas"),
+  exportCanvas: document.querySelector("#export-canvas"),
   viewerFrame: document.querySelector("#viewer-frame"),
   docName: document.querySelector("#doc-name"),
   docMeta: document.querySelector("#doc-meta"),
@@ -44,133 +43,35 @@ const els = {
   statusText: document.querySelector("#status-text"),
 };
 
-const ctx = els.canvas.getContext("2d");
-const WORKING_FRAME_MARGIN_X = 0.04;
-const WORKING_FRAME_MARGIN_Y = 0.04;
-const TRANSFORM_PAD_RATIO = 0.14;
-const OFFSET_LIMIT = 0.2;
-const OFFSET_Y_LIMIT = 0.6;
-const ZOOM_MIN = 1.0;
-const ZOOM_MAX = 2.2;
-const DRAG_SENSITIVITY = 0.35;
-const MRZ_FOCUS_HEIGHT = 0.30;
-const cvState = {
-  ready: false,
-  failed: false,
-  pollCount: 0,
-  hooked: false,
-};
+const viewCtx = els.canvas.getContext("2d");
+const exportCtx = els.exportCanvas.getContext("2d");
+
+const VIEW_MIN_WIDTH = 320;
+const VIEW_MIN_HEIGHT = 240;
+const ZOOM_MIN = 0.85;
+const ZOOM_MAX = 2.4;
+const MRZ_GUIDE_HEIGHT_RATIO = 0.23;
+const MRZ_GUIDE_WIDTH_RATIO = 0.82;
+const MRZ_GUIDE_BOTTOM_MARGIN_RATIO = 0.08;
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
 
 function setStatus(message, isError = false) {
   els.statusText.textContent = message;
   els.statusText.classList.toggle("status-error", isError);
 }
 
-function updateEngineChip() {
-  if (cvState.ready) {
-    els.engineChip.textContent = "preview: OpenCV.js";
-    els.engineChip.classList.add("chip-ready");
-    els.engineChip.classList.remove("chip-muted");
-    return;
-  }
-  if (cvState.failed) {
-    els.engineChip.textContent = "preview: canvas only";
-    els.engineChip.classList.add("chip-muted");
-    els.engineChip.classList.remove("chip-ready");
-    return;
-  }
-  els.engineChip.textContent = "preview: loading OpenCV.js";
-  els.engineChip.classList.add("chip-muted");
-  els.engineChip.classList.remove("chip-ready");
-}
-
-function markOpenCvReady() {
-  if (cvState.ready) {
-    return;
-  }
-  cvState.ready = true;
-  cvState.failed = false;
-  updateEngineChip();
-  renderCanvas();
-}
-
 function formatJson(value) {
   return JSON.stringify(value, null, 2);
 }
 
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function getWorkingFrameCrop() {
-  const width = state.canvasBounds.width;
-  const height = state.canvasBounds.height;
-  if (!width || !height) {
-    return null;
-  }
-
-  return {
-    x: Number(WORKING_FRAME_MARGIN_X.toFixed(6)),
-    y: Number(WORKING_FRAME_MARGIN_Y.toFixed(6)),
-    width: Number((1.0 - (WORKING_FRAME_MARGIN_X * 2)).toFixed(6)),
-    height: Number((1.0 - (WORKING_FRAME_MARGIN_Y * 2)).toFixed(6)),
-  };
-}
-
-function getRotatedImageSize() {
-  if (!state.previewImage) {
-    return { width: 0, height: 0 };
-  }
-  const swapAxes = state.rotation === 90 || state.rotation === 270;
-  return swapAxes
-    ? { width: state.previewImage.height, height: state.previewImage.width }
-    : { width: state.previewImage.width, height: state.previewImage.height };
-}
-
-function releaseMat(key) {
-  const mat = state[key];
-  if (mat && typeof mat.delete === "function") {
-    mat.delete();
-  }
-  state[key] = null;
-}
-
-function clearPreviewMats() {
-  releaseMat("previewMat");
-}
-
-function getPreviewMat() {
-  if (!state.previewImage || !window.cv || !cvState.ready) {
-    return null;
-  }
-  if (state.previewMat) {
-    return state.previewMat;
-  }
-
-  const canvas = document.createElement("canvas");
-  canvas.width = state.previewImage.width;
-  canvas.height = state.previewImage.height;
-  const offscreen = canvas.getContext("2d");
-  offscreen.drawImage(state.previewImage, 0, 0);
-  state.previewMat = window.cv.imread(canvas);
-  return state.previewMat;
-}
-
-function getPaddedPreviewSource() {
-  if (!state.previewImage) {
-    return null;
-  }
-  const image = state.previewImage;
-  const padX = Math.round(image.width * TRANSFORM_PAD_RATIO);
-  const padY = Math.round(image.height * TRANSFORM_PAD_RATIO);
-  const canvas = document.createElement("canvas");
-  canvas.width = image.width + (padX * 2);
-  canvas.height = image.height + (padY * 2);
-  const offscreen = canvas.getContext("2d");
-  offscreen.imageSmoothingEnabled = true;
-  offscreen.imageSmoothingQuality = "high";
-  offscreen.drawImage(image, padX, padY);
-  return canvas;
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 function buildExtractionPayload() {
@@ -186,27 +87,291 @@ function updatePayloadView() {
   els.requestJson.textContent = formatJson(buildExtractionPayload());
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+function updateControls() {
+  const hasDocument = Boolean(state.previewImage);
+  els.rotateLeft.disabled = !hasDocument || state.isBusy;
+  els.rotateRight.disabled = !hasDocument || state.isBusy;
+  els.resetAdjust.disabled = !hasDocument || state.isBusy;
+  els.extractButton.disabled = !hasDocument || state.isBusy;
+  els.uploadButton.disabled = state.isBusy;
+  els.fileInput.disabled = state.isBusy;
+  els.zoomOut.disabled = !hasDocument || state.isBusy;
+  els.zoomIn.disabled = !hasDocument || state.isBusy;
+  els.zoomRange.disabled = !hasDocument || state.isBusy;
+  els.rotationChip.textContent = `rotation: ${state.rotation}`;
+  els.docIdChip.textContent = `document: ${state.documentId || "-"}`;
+  els.engineChip.textContent = "render: dual canvas";
+  els.zoomRange.value = String(state.scale);
+  updatePayloadView();
 }
 
-function getReportFilename(reportPath) {
-  if (!reportPath) {
-    return "";
+function updateDocumentSummary() {
+  if (!state.upload) {
+    els.docName.textContent = "No document";
+    els.docMeta.textContent = "Choose a file to begin. Geometry stays local until extraction.";
+    return;
   }
-  const normalized = String(reportPath).replaceAll("\\", "/");
-  const parts = normalized.split("/");
-  return parts[parts.length - 1] || normalized;
+  els.docName.textContent = state.upload.filename;
+  els.docMeta.textContent = `${state.upload.source_type} | ${state.upload.preview_width}x${state.upload.preview_height}`;
 }
 
-function formatDateYYMMDD(value) {
-  if (!value || !/^\d{6}$/.test(value)) {
+function resetAdjustments() {
+  state.scale = 1;
+  state.rotation = 0;
+  state.offsetX = 0;
+  state.offsetY = 0;
+  state.dragPointer = null;
+  state.dragOrigin = null;
+  drawViewCanvas();
+  renderCropAnalysis();
+  updateControls();
+}
+
+function resetViewAdjustments() {
+  state.scale = 1;
+  state.offsetX = 0;
+  state.offsetY = 0;
+  state.dragPointer = null;
+  state.dragOrigin = null;
+}
+
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const objectUrl = URL.createObjectURL(file);
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("Failed to load the selected image."));
+    };
+    image.src = objectUrl;
+  });
+}
+
+function getViewSize() {
+  const width = Math.max(VIEW_MIN_WIDTH, Math.round(els.viewerFrame.clientWidth || VIEW_MIN_WIDTH));
+  const height = Math.max(VIEW_MIN_HEIGHT, Math.round(els.viewerFrame.clientHeight || VIEW_MIN_HEIGHT));
+  return { width, height };
+}
+
+function getNormalizedRotation() {
+  return ((state.rotation % 360) + 360) % 360;
+}
+
+function getImageDisplaySize() {
+  if (!state.previewImage) {
+    return { width: 0, height: 0 };
+  }
+  const rotation = getNormalizedRotation();
+  if (rotation === 90 || rotation === 270) {
+    return { width: state.previewImage.height, height: state.previewImage.width };
+  }
+  return { width: state.previewImage.width, height: state.previewImage.height };
+}
+
+function computeViewBaseScale() {
+  const imageSize = getImageDisplaySize();
+  if (!imageSize.width || !imageSize.height) {
+    return 1;
+  }
+  const viewSize = getViewSize();
+  return Math.min(viewSize.width / imageSize.width, viewSize.height / imageSize.height);
+}
+
+function renderImage(targetCtx, canvas, baseScale, backgroundFill) {
+  const image = state.previewImage;
+  if (!image) {
+    return;
+  }
+
+  targetCtx.clearRect(0, 0, canvas.width, canvas.height);
+  targetCtx.fillStyle = backgroundFill;
+  targetCtx.fillRect(0, 0, canvas.width, canvas.height);
+  targetCtx.imageSmoothingEnabled = true;
+  targetCtx.imageSmoothingQuality = "high";
+  targetCtx.save();
+  targetCtx.translate(canvas.width / 2, canvas.height / 2);
+  targetCtx.rotate((state.rotation * Math.PI) / 180);
+  targetCtx.scale(baseScale * state.scale, baseScale * state.scale);
+  targetCtx.drawImage(
+    image,
+    -image.width / 2 + state.offsetX,
+    -image.height / 2 + state.offsetY,
+    image.width,
+    image.height,
+  );
+  targetCtx.restore();
+}
+
+function computeMrzGuideRect(width = state.viewSize.width, height = state.viewSize.height) {
+  const rectWidth = width * MRZ_GUIDE_WIDTH_RATIO;
+  const rectHeight = height * MRZ_GUIDE_HEIGHT_RATIO;
+  const x = (width - rectWidth) / 2;
+  const y = height - rectHeight - (height * MRZ_GUIDE_BOTTOM_MARGIN_RATIO);
+  return { x, y, width: rectWidth, height: rectHeight };
+}
+
+function getTransformedImageBounds() {
+  if (!state.previewImage) {
     return null;
   }
-  return `${value.slice(0, 2)}-${value.slice(2, 4)}-${value.slice(4, 6)}`;
+
+  const image = state.previewImage;
+  const scale = state.viewBaseScale * state.scale;
+  const radians = (state.rotation * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const cx = state.viewSize.width / 2;
+  const cy = state.viewSize.height / 2;
+  const corners = [
+    [-image.width / 2 + state.offsetX, -image.height / 2 + state.offsetY],
+    [image.width / 2 + state.offsetX, -image.height / 2 + state.offsetY],
+    [image.width / 2 + state.offsetX, image.height / 2 + state.offsetY],
+    [-image.width / 2 + state.offsetX, image.height / 2 + state.offsetY],
+  ].map(([x, y]) => ({
+    x: cx + ((x * cos) - (y * sin)) * scale,
+    y: cy + ((x * sin) + (y * cos)) * scale,
+  }));
+
+  const xs = corners.map((point) => point.x);
+  const ys = corners.map((point) => point.y);
+  return {
+    left: Math.min(...xs),
+    right: Math.max(...xs),
+    top: Math.min(...ys),
+    bottom: Math.max(...ys),
+  };
+}
+
+function drawMrzOverlay() {
+  const rect = computeMrzGuideRect();
+  const labelY = Math.max(22, rect.y - 14);
+
+  viewCtx.save();
+  viewCtx.fillStyle = "rgba(8, 12, 18, 0.28)";
+  viewCtx.beginPath();
+  viewCtx.rect(0, 0, state.viewSize.width, state.viewSize.height);
+  viewCtx.rect(rect.x, rect.y, rect.width, rect.height);
+  viewCtx.fill("evenodd");
+
+  viewCtx.strokeStyle = "rgba(88, 224, 255, 0.72)";
+  viewCtx.lineWidth = 1.5;
+  viewCtx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+
+  viewCtx.fillStyle = "rgba(196, 244, 255, 0.88)";
+  viewCtx.font = '600 13px "Segoe UI", sans-serif';
+  viewCtx.textAlign = "left";
+  viewCtx.fillText("Align MRZ here", rect.x, labelY);
+  viewCtx.restore();
+}
+
+function drawScanAnimation(timestampMs) {
+  if (!state.previewImage) {
+    return;
+  }
+  if (!state.animationStartMs) {
+    state.animationStartMs = timestampMs;
+  }
+
+  const rect = computeMrzGuideRect();
+  const elapsed = (timestampMs - state.animationStartMs) / 1000;
+  const wave = (Math.sin(elapsed * 1.4) + 1) / 2;
+  const y = rect.y + (wave * rect.height);
+
+  viewCtx.save();
+  viewCtx.beginPath();
+  viewCtx.rect(rect.x, rect.y, rect.width, rect.height);
+  viewCtx.clip();
+  const gradient = viewCtx.createLinearGradient(rect.x, y - 8, rect.x, y + 8);
+  gradient.addColorStop(0, "rgba(88, 224, 255, 0)");
+  gradient.addColorStop(0.5, "rgba(88, 224, 255, 0.6)");
+  gradient.addColorStop(1, "rgba(88, 224, 255, 0)");
+  viewCtx.strokeStyle = gradient;
+  viewCtx.lineWidth = 2;
+  viewCtx.beginPath();
+  viewCtx.moveTo(rect.x + 10, y);
+  viewCtx.lineTo(rect.x + rect.width - 10, y);
+  viewCtx.stroke();
+  viewCtx.restore();
+}
+
+function getGuideStatus() {
+  if (!state.previewImage) {
+    return "No document loaded.";
+  }
+
+  const guide = computeMrzGuideRect();
+  const bounds = getTransformedImageBounds();
+  if (!bounds) {
+    return "MRZ guide active";
+  }
+
+  const overlapsGuide =
+    bounds.left < guide.x + guide.width &&
+    bounds.right > guide.x &&
+    bounds.top < guide.y + guide.height &&
+    bounds.bottom > guide.y;
+
+  if (!overlapsGuide) {
+    return "Adjust position for optimal capture";
+  }
+  if (state.scale < 0.95) {
+    return "Zoom in slightly for a stronger MRZ capture";
+  }
+  return "Ready for extraction";
+}
+
+function drawViewCanvas(timestampMs = performance.now()) {
+  const viewSize = getViewSize();
+  state.viewSize = viewSize;
+  state.viewBaseScale = computeViewBaseScale();
+  els.viewerFrame.classList.toggle("empty", !state.previewImage);
+
+  els.canvas.width = viewSize.width;
+  els.canvas.height = viewSize.height;
+
+  if (!state.previewImage) {
+    viewCtx.clearRect(0, 0, viewSize.width, viewSize.height);
+    viewCtx.fillStyle = "#f6f0e5";
+    viewCtx.fillRect(0, 0, viewSize.width, viewSize.height);
+    viewCtx.fillStyle = "#67757c";
+    viewCtx.font = '600 18px "Segoe UI", sans-serif';
+    viewCtx.textAlign = "center";
+    viewCtx.fillText("Upload a document to preview it here.", viewSize.width / 2, viewSize.height / 2);
+    return;
+  }
+
+  renderImage(viewCtx, els.canvas, state.viewBaseScale, "#101417");
+  drawMrzOverlay();
+  drawScanAnimation(timestampMs);
+}
+
+function drawExportCanvas() {
+  if (!state.previewImage) {
+    return;
+  }
+  els.exportCanvas.width = state.previewImage.width;
+  els.exportCanvas.height = state.previewImage.height;
+  renderImage(exportCtx, els.exportCanvas, 1, "#ffffff");
+}
+
+function dataUrlToBlob(dataUrl) {
+  const [meta, base64] = dataUrl.split(",");
+  const mime = meta.match(/data:(.*?);base64/)?.[1] || "image/jpeg";
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mime });
+}
+
+function extractImage() {
+  drawExportCanvas();
+  return els.exportCanvas.toDataURL("image/jpeg", 0.95);
 }
 
 function buildAnalysis(result) {
@@ -224,18 +389,16 @@ function buildAnalysis(result) {
   const line1 = result.line1 || "";
   const line2 = result.line2 || "";
   const cards = [];
-  const mrzItems = [];
-  const structuralItems = [];
+  const mrzItems = [line1 || "-", line2 || "-"];
+  const structuralItems = [
+    `Status: ${result.status || "unknown"}`,
+    `Line 1 length: ${line1.length}/44`,
+    `Line 2 length: ${line2.length}/44`,
+  ];
   const identityItems = [];
   const documentItems = [];
   const warningItems = [];
 
-  mrzItems.push(line1 || "-");
-  mrzItems.push(line2 || "-");
-
-  structuralItems.push(`Status: ${result.status || "unknown"}`);
-  structuralItems.push(`Line 1 length: ${line1.length}/44`);
-  structuralItems.push(`Line 2 length: ${line2.length}/44`);
   if (typeof result.duration_ms === "number") {
     structuralItems.push(`Duration: ${result.duration_ms.toFixed(2)} ms`);
   }
@@ -255,7 +418,6 @@ function buildAnalysis(result) {
   if (parsed.sex) {
     identityItems.push(`Sex: ${parsed.sex}`);
   }
-
   if (parsed.document_number) {
     documentItems.push(`Document number: ${parsed.document_number}`);
   }
@@ -263,17 +425,10 @@ function buildAnalysis(result) {
     documentItems.push(`Nationality: ${parsed.nationality}`);
   }
   if (parsed.birth_date_yymmdd) {
-    documentItems.push(
-      `Birth date: ${parsed.birth_date_yymmdd}${formatDateYYMMDD(parsed.birth_date_yymmdd) ? ` (${formatDateYYMMDD(parsed.birth_date_yymmdd)})` : ""}`
-    );
+    documentItems.push(`Birth date: ${parsed.birth_date_yymmdd}`);
   }
   if (parsed.expiry_date_yymmdd) {
-    documentItems.push(
-      `Expiry date: ${parsed.expiry_date_yymmdd}${formatDateYYMMDD(parsed.expiry_date_yymmdd) ? ` (${formatDateYYMMDD(parsed.expiry_date_yymmdd)})` : ""}`
-    );
-  }
-  if (parsed.personal_number) {
-    documentItems.push(`Personal number: ${parsed.personal_number}`);
+    documentItems.push(`Expiry date: ${parsed.expiry_date_yymmdd}`);
   }
 
   if (line1.length !== 44) {
@@ -285,78 +440,54 @@ function buildAnalysis(result) {
   if (!parsed.document_number) {
     warningItems.push("Document number was not parsed from line 2.");
   }
-  if (!parsed.nationality) {
-    warningItems.push("Nationality was not parsed from line 2.");
-  }
   if (!parsed.surname && !parsed.given_names) {
     warningItems.push("Name fields were not parsed from line 1.");
   }
 
-  cards.push({
-    title: "MRZ Output",
-    items: mrzItems,
-    tone: "",
-  });
-
+  cards.push({ title: "MRZ Output", items: mrzItems, tone: "" });
   if (identityItems.length > 0) {
-    cards.push({
-      title: "Identity Fields",
-      items: identityItems,
-      tone: "",
-    });
+    cards.push({ title: "Identity Fields", items: identityItems, tone: "" });
   }
-
   if (documentItems.length > 0) {
-    cards.push({
-      title: "Document Fields",
-      items: documentItems,
-      tone: "",
-    });
+    cards.push({ title: "Document Fields", items: documentItems, tone: "" });
   }
-
   cards.push({
     title: "Structural Summary",
     items: structuralItems,
     tone: warningItems.length === 0 ? "analysis-good" : "",
   });
-
   cards.push({
     title: "Quality Notes",
     items: warningItems.length > 0 ? warningItems : ["Line lengths and parsed fields look structurally plausible for TD3 output."],
     tone: warningItems.length > 0 ? "analysis-warn" : "analysis-good",
   });
-
   return cards;
 }
 
 function renderAnalysis(result) {
   const cards = buildAnalysis(result);
-  els.analysisOutput.innerHTML = cards
-    .map((card) => {
-      const items = card.items
-        .map((item) => {
-          if (typeof item === "string") {
-            const itemClass = card.title === "MRZ Output" ? "mrz-line" : "";
-            return `<li class="${itemClass}">${escapeHtml(item)}</li>`;
-          }
-          if (item && item.type === "link") {
-            return `<li>${escapeHtml(item.label)}: <a class="analysis-link" href="${escapeHtml(item.href)}" target="_blank" rel="noreferrer">${escapeHtml(item.text)}</a></li>`;
-          }
-          return "";
-        })
-        .join("");
-      const listClass = card.title === "MRZ Output" ? "mrz-list" : "";
-      return `
-        <section class="analysis-card">
-          <h3 class="${card.tone || ""}">${escapeHtml(card.title)}</h3>
-          <ul class="${listClass}">${items}</ul>
-        </section>
-      `;
-    })
-    .join("");
+  els.analysisOutput.innerHTML = cards.map((card) => {
+    const items = card.items.map((item) => {
+      if (typeof item === "string") {
+        const itemClass = card.title === "MRZ Output" ? "mrz-line" : "";
+        return `<li class="${itemClass}">${escapeHtml(item)}</li>`;
+      }
+      if (item && item.type === "link") {
+        return `<li>${escapeHtml(item.label)}: <a class="analysis-link" href="${escapeHtml(item.href)}" target="_blank" rel="noreferrer">${escapeHtml(item.text)}</a></li>`;
+      }
+      return "";
+    }).join("");
+    const listClass = card.title === "MRZ Output" ? "mrz-list" : "";
+    return `
+      <section class="analysis-card">
+        <h3 class="${card.tone || ""}">${escapeHtml(card.title)}</h3>
+        <ul class="${listClass}">${items}</ul>
+      </section>
+    `;
+  }).join("");
 }
 
-function buildCropAnalysis() {
+function buildAdjustmentCards() {
   if (!state.previewImage) {
     return [
       {
@@ -366,432 +497,111 @@ function buildCropAnalysis() {
       },
     ];
   }
-  const warnings = [];
-  const fixedCrop = getWorkingFrameCrop();
 
-  if (Math.abs(state.microRotation) > 3.0) {
-    warnings.push("Micro rotation is fairly large. Recheck that the page is truly skewed before keeping it.");
-  }
-  if (state.zoom > 1.6) {
-    warnings.push("Zoom is high. Make sure important document edges are not pushed out of frame.");
-  }
-  if (Math.abs(state.offsetX) > 0.12) {
-    warnings.push("Horizontal shift is large. Verify the passport page is still centered enough for extraction.");
-  }
-  if (Math.abs(state.offsetY) > 0.35) {
-    warnings.push("Vertical shift is large. Verify the passport page is still fully visible.");
-  }
-
-  const cards = [
+  return [
     {
       title: "Adjustment Geometry",
       items: [
         `Rotation: ${state.rotation} degrees`,
-        `Micro rotation: ${state.microRotation.toFixed(1)} degrees`,
-        `Zoom: ${state.zoom.toFixed(2)}x`,
-        `Offset: x=${state.offsetX.toFixed(3)}, y=${state.offsetY.toFixed(3)}`,
-        `Fixed crop: x=${fixedCrop.x.toFixed(3)}, y=${fixedCrop.y.toFixed(3)}, width=${fixedCrop.width.toFixed(3)}, height=${fixedCrop.height.toFixed(3)}`,
+        `Scale: ${state.scale.toFixed(2)}x`,
+        `Offset: x=${state.offsetX.toFixed(1)}, y=${state.offsetY.toFixed(1)}`,
       ],
-      tone: warnings.length === 0 ? "analysis-good" : "",
+      tone: "analysis-good",
     },
     {
-      title: "Quick Notes",
-      items: warnings.length > 0
-        ? warnings
-        : ["Current alignment looks broadly reasonable for a first extraction pass."],
-      tone: warnings.length > 0 ? "analysis-warn" : "analysis-good",
+      title: "Guide Status",
+      items: [
+        "MRZ guide active",
+        getGuideStatus(),
+      ],
+      tone: "analysis-good",
     },
   ];
-
-  return cards;
 }
 
 function renderCropAnalysis() {
-  const cards = buildCropAnalysis();
-  els.cropAnalysisOutput.innerHTML = cards
-    .map((card) => {
-      const items = card.items
-        .map((item) => `<li>${escapeHtml(item)}</li>`)
-        .join("");
-      return `
-        <section class="analysis-card">
-          <h3 class="${card.tone || ""}">${escapeHtml(card.title)}</h3>
-          <ul>${items}</ul>
-        </section>
-      `;
-    })
-    .join("");
+  const cards = buildAdjustmentCards();
+  els.cropAnalysisOutput.innerHTML = cards.map((card) => {
+    const items = card.items.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+    return `
+      <section class="analysis-card">
+        <h3 class="${card.tone || ""}">${escapeHtml(card.title)}</h3>
+        <ul>${items}</ul>
+      </section>
+    `;
+  }).join("");
 }
 
-function updateControls() {
-  const hasDocument = Boolean(state.previewImage);
-  els.rotateLeft.disabled = !hasDocument || state.isBusy;
-  els.rotateRight.disabled = !hasDocument || state.isBusy;
-  els.resetAdjust.disabled = !hasDocument || state.isBusy;
-  els.extractButton.disabled = !hasDocument || state.isBusy;
-  els.uploadButton.disabled = state.isBusy;
-  els.fileInput.disabled = state.isBusy;
-  els.microRotate.disabled = !hasDocument || state.isBusy;
-  els.zoomOut.disabled = !hasDocument || state.isBusy;
-  els.zoomIn.disabled = !hasDocument || state.isBusy;
-  els.zoomRange.disabled = !hasDocument || state.isBusy;
-  els.offsetXRange.disabled = !hasDocument || state.isBusy;
-  els.offsetYRange.disabled = !hasDocument || state.isBusy;
-  els.rotationChip.textContent = `rotation: ${state.rotation}`;
-  els.docIdChip.textContent = `document: ${state.documentId || "-"}`;
-  els.microRotate.value = String(state.microRotation);
-  els.zoomRange.value = String(state.zoom);
-  els.offsetXRange.value = String(state.offsetX);
-  els.offsetYRange.value = String(state.offsetY);
-  updatePayloadView();
+function animate(timestampMs) {
+  drawViewCanvas(timestampMs);
+  state.animationFrameId = window.requestAnimationFrame(animate);
 }
 
-function updateDocumentSummary() {
-  if (!state.upload) {
-    els.docName.textContent = "No document";
-    els.docMeta.textContent = "Choose a file to begin. Geometry stays local until extraction.";
+function ensureAnimationLoop() {
+  if (state.animationFrameId !== null) {
     return;
   }
-
-  els.docName.textContent = state.upload.filename;
-  els.docMeta.textContent =
-    `${state.upload.source_type} | ${state.upload.preview_width}x${state.upload.preview_height}`;
+  state.animationFrameId = window.requestAnimationFrame(animate);
 }
 
-function resetAdjustments() {
-  state.microRotation = 0;
-  state.zoom = 1;
-  state.offsetX = 0;
-  state.offsetY = 0;
-  state.dragStart = null;
-  state.dragCurrent = null;
-  renderCanvas();
-  renderCropAnalysis();
-  updateControls();
-}
-
-function drawEmptyCanvas() {
-  ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
-  ctx.fillStyle = "#f6f0e5";
-  ctx.fillRect(0, 0, els.canvas.width, els.canvas.height);
-  ctx.fillStyle = "#67757c";
-  ctx.font = "600 18px Segoe UI";
-  ctx.textAlign = "center";
-  ctx.fillText("Upload a document to preview it here.", els.canvas.width / 2, els.canvas.height / 2);
-}
-
-function drawCropRect(rectPx) {
-  ctx.save();
-  ctx.fillStyle = "rgba(13, 107, 95, 0.16)";
-  ctx.strokeStyle = "#0d6b5f";
-  ctx.lineWidth = 2;
-  ctx.fillRect(rectPx.x, rectPx.y, rectPx.width, rectPx.height);
-  ctx.strokeRect(rectPx.x, rectPx.y, rectPx.width, rectPx.height);
-  ctx.restore();
-}
-
-function drawOverlay(targetWidth, targetHeight) {
-  const frameX = targetWidth * WORKING_FRAME_MARGIN_X;
-  const frameY = targetHeight * WORKING_FRAME_MARGIN_Y;
-  const frameWidth = targetWidth * (1 - (WORKING_FRAME_MARGIN_X * 2));
-  const frameHeight = targetHeight * (1 - (WORKING_FRAME_MARGIN_Y * 2));
-  const mrzFocusY = frameY + (frameHeight * (1 - MRZ_FOCUS_HEIGHT));
-  const mrzFocusHeight = frameHeight * MRZ_FOCUS_HEIGHT;
-
-  ctx.save();
-  ctx.fillStyle = "rgba(40, 112, 197, 0.20)";
-  ctx.beginPath();
-  ctx.rect(0, 0, targetWidth, targetHeight);
-  ctx.rect(frameX, frameY, frameWidth, frameHeight);
-  ctx.fill("evenodd");
-  ctx.strokeStyle = "rgba(34, 139, 34, 0.95)";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(frameX, frameY, frameWidth, frameHeight);
-  ctx.fillStyle = "rgba(40, 112, 197, 0.16)";
-  ctx.fillRect(frameX, frameY, frameWidth, Math.max(0, mrzFocusY - frameY));
-  ctx.strokeStyle = "rgba(20, 92, 170, 0.45)";
-  ctx.setLineDash([8, 6]);
-  ctx.strokeRect(frameX, mrzFocusY, frameWidth, mrzFocusHeight);
-  ctx.restore();
-}
-
-function renderCanvasWithCanvas() {
-  const source = getPaddedPreviewSource();
-  const rotated = getRotatedImageSize();
-  const targetWidth = Math.max(320, Math.round(els.viewerFrame.clientWidth - 2));
-  const targetHeight = Math.max(240, Math.round(els.viewerFrame.clientHeight - 2));
-  const scale = Math.min(targetWidth / rotated.width, targetHeight / rotated.height);
-
-  els.canvas.width = targetWidth;
-  els.canvas.height = targetHeight;
-  state.canvasScale = scale;
-  state.canvasBounds = { x: 0, y: 0, width: targetWidth, height: targetHeight };
-
-  ctx.clearRect(0, 0, targetWidth, targetHeight);
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.save();
-  ctx.translate(targetWidth / 2, targetHeight / 2);
-  ctx.scale(scale, scale);
-  ctx.translate(state.offsetX * rotated.width, state.offsetY * rotated.height);
-  ctx.rotate((state.microRotation * Math.PI) / 180);
-  ctx.scale(state.zoom, state.zoom);
-
-  if (state.rotation === 0) {
-    ctx.drawImage(source, -source.width / 2, -source.height / 2);
-  } else if (state.rotation === 90) {
-    ctx.rotate(Math.PI / 2);
-    ctx.drawImage(source, -source.width / 2, -source.height / 2);
-  } else if (state.rotation === 180) {
-    ctx.rotate(Math.PI);
-    ctx.drawImage(source, -source.width / 2, -source.height / 2);
-  } else if (state.rotation === 270) {
-    ctx.rotate(-Math.PI / 2);
-    ctx.drawImage(source, -source.width / 2, -source.height / 2);
-  }
-  ctx.restore();
-  drawOverlay(targetWidth, targetHeight);
-}
-
-function renderCanvasWithOpenCv() {
-  const cv = window.cv;
-  const source = getPreviewMat();
-  if (!source) {
-    renderCanvasWithCanvas();
+function stopAnimationLoop() {
+  if (state.animationFrameId === null) {
     return;
   }
-
-  const rotatedBase = new cv.Mat();
-  if (state.rotation === 90) {
-    cv.rotate(source, rotatedBase, cv.ROTATE_90_CLOCKWISE);
-  } else if (state.rotation === 180) {
-    cv.rotate(source, rotatedBase, cv.ROTATE_180);
-  } else if (state.rotation === 270) {
-    cv.rotate(source, rotatedBase, cv.ROTATE_90_COUNTERCLOCKWISE);
-  } else {
-    source.copyTo(rotatedBase);
-  }
-
-  const targetWidth = Math.max(320, Math.round(els.viewerFrame.clientWidth - 2));
-  const targetHeight = Math.max(240, Math.round(els.viewerFrame.clientHeight - 2));
-  const h = rotatedBase.rows;
-  const w = rotatedBase.cols;
-  const padX = Math.round(w * TRANSFORM_PAD_RATIO);
-  const padY = Math.round(h * TRANSFORM_PAD_RATIO);
-  const padded = new cv.Mat();
-  cv.copyMakeBorder(rotatedBase, padded, padY, padY, padX, padX, cv.BORDER_REPLICATE);
-
-  const centerX = padded.cols / 2.0;
-  const centerY = padded.rows / 2.0;
-  const matrix = cv.getRotationMatrix2D(
-    new cv.Point(centerX, centerY),
-    -state.microRotation,
-    state.zoom
-  );
-  matrix.doublePtr(0, 2)[0] += state.offsetX * w;
-  matrix.doublePtr(1, 2)[0] += state.offsetY * h;
-
-  const scale = Math.min(targetWidth / w, targetHeight / h);
-  matrix.doublePtr(0, 0)[0] *= scale;
-  matrix.doublePtr(0, 1)[0] *= scale;
-  matrix.doublePtr(1, 0)[0] *= scale;
-  matrix.doublePtr(1, 1)[0] *= scale;
-  matrix.doublePtr(0, 2)[0] += (targetWidth / 2.0) - (centerX * scale);
-  matrix.doublePtr(1, 2)[0] += (targetHeight / 2.0) - (centerY * scale);
-
-  const rendered = new cv.Mat();
-  cv.warpAffine(
-    padded,
-    rendered,
-    matrix,
-    new cv.Size(targetWidth, targetHeight),
-    cv.INTER_LINEAR,
-    cv.BORDER_CONSTANT,
-    new cv.Scalar(255, 255, 255, 255)
-  );
-
-  els.canvas.width = targetWidth;
-  els.canvas.height = targetHeight;
-  state.canvasScale = scale;
-  state.canvasBounds = { x: 0, y: 0, width: targetWidth, height: targetHeight };
-  cv.imshow(els.canvas, rendered);
-  drawOverlay(targetWidth, targetHeight);
-
-  rendered.delete();
-  matrix.delete();
-  padded.delete();
-  rotatedBase.delete();
-}
-
-function renderCanvas() {
-  if (!state.previewImage) {
-    els.viewerFrame.classList.add("empty");
-    drawEmptyCanvas();
-    return;
-  }
-
-  els.viewerFrame.classList.remove("empty");
-  if (window.cv && cvState.ready) {
-    renderCanvasWithOpenCv();
-    return;
-  }
-
-  renderCanvasWithCanvas();
-}
-
-function renderFinalCanvasWithCanvas(targetCanvas) {
-  const targetWidth = Math.max(320, Math.round(els.viewerFrame.clientWidth - 2));
-  const targetHeight = Math.max(240, Math.round(els.viewerFrame.clientHeight - 2));
-  const targetCtx = targetCanvas.getContext("2d");
-  const source = getPaddedPreviewSource();
-  const rotated = getRotatedImageSize();
-  const scale = Math.min(targetWidth / rotated.width, targetHeight / rotated.height);
-
-  targetCanvas.width = targetWidth;
-  targetCanvas.height = targetHeight;
-  targetCtx.clearRect(0, 0, targetWidth, targetHeight);
-  targetCtx.fillStyle = "#ffffff";
-  targetCtx.fillRect(0, 0, targetWidth, targetHeight);
-  targetCtx.imageSmoothingEnabled = true;
-  targetCtx.imageSmoothingQuality = "high";
-  targetCtx.save();
-  targetCtx.translate(targetWidth / 2, targetHeight / 2);
-  targetCtx.scale(scale, scale);
-  targetCtx.translate(state.offsetX * rotated.width, state.offsetY * rotated.height);
-  targetCtx.rotate((state.microRotation * Math.PI) / 180);
-  targetCtx.scale(state.zoom, state.zoom);
-
-  if (state.rotation === 0) {
-    targetCtx.drawImage(source, -source.width / 2, -source.height / 2);
-  } else if (state.rotation === 90) {
-    targetCtx.rotate(Math.PI / 2);
-    targetCtx.drawImage(source, -source.width / 2, -source.height / 2);
-  } else if (state.rotation === 180) {
-    targetCtx.rotate(Math.PI);
-    targetCtx.drawImage(source, -source.width / 2, -source.height / 2);
-  } else if (state.rotation === 270) {
-    targetCtx.rotate(-Math.PI / 2);
-    targetCtx.drawImage(source, -source.width / 2, -source.height / 2);
-  }
-  targetCtx.restore();
-}
-
-function renderFinalCanvasWithOpenCv(targetCanvas) {
-  const cv = window.cv;
-  const source = getPreviewMat();
-  if (!source) {
-    renderFinalCanvasWithCanvas(targetCanvas);
-    return;
-  }
-
-  const rotatedBase = new cv.Mat();
-  if (state.rotation === 90) {
-    cv.rotate(source, rotatedBase, cv.ROTATE_90_CLOCKWISE);
-  } else if (state.rotation === 180) {
-    cv.rotate(source, rotatedBase, cv.ROTATE_180);
-  } else if (state.rotation === 270) {
-    cv.rotate(source, rotatedBase, cv.ROTATE_90_COUNTERCLOCKWISE);
-  } else {
-    source.copyTo(rotatedBase);
-  }
-
-  const targetWidth = Math.max(320, Math.round(els.viewerFrame.clientWidth - 2));
-  const targetHeight = Math.max(240, Math.round(els.viewerFrame.clientHeight - 2));
-  const h = rotatedBase.rows;
-  const w = rotatedBase.cols;
-  const padX = Math.round(w * TRANSFORM_PAD_RATIO);
-  const padY = Math.round(h * TRANSFORM_PAD_RATIO);
-  const padded = new cv.Mat();
-  cv.copyMakeBorder(rotatedBase, padded, padY, padY, padX, padX, cv.BORDER_REPLICATE);
-
-  const centerX = padded.cols / 2.0;
-  const centerY = padded.rows / 2.0;
-  const matrix = cv.getRotationMatrix2D(
-    new cv.Point(centerX, centerY),
-    -state.microRotation,
-    state.zoom
-  );
-  matrix.doublePtr(0, 2)[0] += state.offsetX * w;
-  matrix.doublePtr(1, 2)[0] += state.offsetY * h;
-
-  const scale = Math.min(targetWidth / w, targetHeight / h);
-  matrix.doublePtr(0, 0)[0] *= scale;
-  matrix.doublePtr(0, 1)[0] *= scale;
-  matrix.doublePtr(1, 0)[0] *= scale;
-  matrix.doublePtr(1, 1)[0] *= scale;
-  matrix.doublePtr(0, 2)[0] += (targetWidth / 2.0) - (centerX * scale);
-  matrix.doublePtr(1, 2)[0] += (targetHeight / 2.0) - (centerY * scale);
-
-  const rendered = new cv.Mat();
-  cv.warpAffine(
-    padded,
-    rendered,
-    matrix,
-    new cv.Size(targetWidth, targetHeight),
-    cv.INTER_LINEAR,
-    cv.BORDER_CONSTANT,
-    new cv.Scalar(255, 255, 255, 255)
-  );
-  targetCanvas.width = targetWidth;
-  targetCanvas.height = targetHeight;
-  cv.imshow(targetCanvas, rendered);
-
-  rendered.delete();
-  matrix.delete();
-  padded.delete();
-  rotatedBase.delete();
-}
-
-function renderFinalCanvas() {
-  const targetCanvas = document.createElement("canvas");
-  if (window.cv && cvState.ready) {
-    renderFinalCanvasWithOpenCv(targetCanvas);
-  } else {
-    renderFinalCanvasWithCanvas(targetCanvas);
-  }
-  return targetCanvas;
-}
-
-async function canvasToPngBlob(canvas) {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob) {
-        resolve(blob);
-        return;
-      }
-      reject(new Error("Failed to encode frontend-rendered image."));
-    }, "image/png");
-  });
+  window.cancelAnimationFrame(state.animationFrameId);
+  state.animationFrameId = null;
 }
 
 function getCanvasPointer(event) {
   const rect = els.canvas.getBoundingClientRect();
-  const x = clamp(event.clientX - rect.left, 0, rect.width);
-  const y = clamp(event.clientY - rect.top, 0, rect.height);
   return {
-    x: rect.width === 0 ? 0 : x / rect.width,
-    y: rect.height === 0 ? 0 : y / rect.height,
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
   };
 }
 
-async function loadLocalImage(file) {
-  const image = new Image();
-  image.decoding = "async";
-  const objectUrl = URL.createObjectURL(file);
-  try {
-    image.src = objectUrl;
-    await image.decode();
-    return image;
-  } finally {
-    URL.revokeObjectURL(objectUrl);
+function handlePointerDown(event) {
+  if (!state.previewImage || state.isBusy) {
+    return;
   }
+  els.canvas.setPointerCapture(event.pointerId);
+  state.dragPointer = event.pointerId;
+  state.dragOrigin = getCanvasPointer(event);
+}
+
+function handlePointerMove(event) {
+  if (state.dragPointer !== event.pointerId || !state.dragOrigin || !state.previewImage) {
+    return;
+  }
+  const next = getCanvasPointer(event);
+  const dx = next.x - state.dragOrigin.x;
+  const dy = next.y - state.dragOrigin.y;
+  const renderScale = state.viewBaseScale * state.scale;
+  if (renderScale > 0) {
+    state.offsetX += dx / renderScale;
+    state.offsetY += dy / renderScale;
+  }
+  state.dragOrigin = next;
+  renderCropAnalysis();
+  setStatus(getGuideStatus());
+}
+
+function handlePointerUp(event) {
+  if (state.dragPointer !== event.pointerId) {
+    return;
+  }
+  els.canvas.releasePointerCapture(event.pointerId);
+  state.dragPointer = null;
+  state.dragOrigin = null;
+  renderCropAnalysis();
+  setStatus(getGuideStatus());
 }
 
 async function handleUpload(event) {
   event.preventDefault();
-  const file = els.fileInput.files[0];
+  const file = els.fileInput.files?.[0];
   if (!file) {
-    setStatus("Choose a file before uploading.", true);
+    setStatus("Choose a file before loading.", true);
     return;
   }
 
@@ -800,34 +610,26 @@ async function handleUpload(event) {
   setStatus(`Loading ${file.name} locally ...`);
 
   try {
-    const image = await loadLocalImage(file);
-    const payload = {
+    const image = await loadImage(file);
+    state.upload = {
       filename: file.name,
       source_type: "local_image",
       extension: file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).toLowerCase() : "",
       preview_width: image.width,
       preview_height: image.height,
     };
-
-    state.upload = payload;
-    state.documentId = null;
     state.previewImage = image;
-    clearPreviewMats();
-    state.rotation = 0;
-    state.microRotation = 0;
-    state.zoom = 1;
-    state.offsetX = 0;
-    state.offsetY = 0;
-    state.dragStart = null;
-    state.dragCurrent = null;
-
-    els.uploadJson.textContent = formatJson(payload);
+    state.documentId = null;
+    state.extractionResult = null;
+    state.animationStartMs = 0;
+    resetAdjustments();
+    updateDocumentSummary();
+    els.uploadJson.textContent = formatJson(state.upload);
     els.resultJson.textContent = "No extraction yet.";
     renderAnalysis(null);
     renderCropAnalysis();
-    updateDocumentSummary();
-    renderCanvas();
-    setStatus(`Loaded ${payload.filename} locally. Adjust it, then run extraction.`);
+    setStatus("MRZ guide active");
+    ensureAnimationLoop();
   } catch (error) {
     setStatus(error.message || "Local load failed.", true);
   } finally {
@@ -836,16 +638,24 @@ async function handleUpload(event) {
   }
 }
 
+function adjustZoom(nextScale) {
+  state.scale = Number(clamp(nextScale, ZOOM_MIN, ZOOM_MAX).toFixed(2));
+  drawViewCanvas();
+  renderCropAnalysis();
+  setStatus(getGuideStatus());
+  updateControls();
+}
+
 function rotate(delta) {
   if (!state.previewImage) {
     return;
   }
   state.rotation = (state.rotation + delta + 360) % 360;
-  resetAdjustments();
-  renderCanvas();
+  resetViewAdjustments();
+  drawViewCanvas();
+  setStatus(getGuideStatus());
   renderCropAnalysis();
   updateControls();
-  setStatus(`Rotation set to ${state.rotation} degrees.`);
 }
 
 async function handleExtraction() {
@@ -855,16 +665,16 @@ async function handleExtraction() {
 
   state.isBusy = true;
   updateControls();
-  setStatus("Rendering final frontend image ...");
+  setStatus("Rendering full-resolution export ...");
 
   try {
-    const finalCanvas = renderFinalCanvas();
-    const blob = await canvasToPngBlob(finalCanvas);
-    const uploadName = `${(state.upload?.filename || "document").replace(/\.[^.]+$/, "")}_frontend.png`;
+    const imageDataUrl = extractImage();
+    const blob = dataUrlToBlob(imageDataUrl);
+    const uploadName = `${(state.upload?.filename || "document").replace(/\.[^.]+$/, "")}_frontend.jpg`;
     const formData = new FormData();
     formData.append("file", blob, uploadName);
 
-    setStatus("Uploading frontend-rendered image ...");
+    setStatus("Uploading final prepared image ...");
     const uploadResponse = await fetch("/api/uploads", {
       method: "POST",
       body: formData,
@@ -879,7 +689,7 @@ async function handleExtraction() {
     updateControls();
 
     const payload = buildExtractionPayload();
-    setStatus("Running extraction on frontend-authored image ...");
+    setStatus("Running extraction ...");
     const response = await fetch("/api/extractions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -890,6 +700,7 @@ async function handleExtraction() {
       throw new Error(result.detail || "Extraction failed.");
     }
 
+    state.extractionResult = result;
     els.resultJson.textContent = formatJson(result);
     renderAnalysis(result);
     setStatus(`Extraction completed with status=${result.status}.`);
@@ -901,137 +712,32 @@ async function handleExtraction() {
   }
 }
 
-function handlePointerDown(event) {
-  if (!state.previewImage || state.isBusy) {
-    return;
-  }
-  state.dragStart = getCanvasPointer(event);
-  state.dragCurrent = state.dragStart;
-  renderCanvas();
-}
-
-function handlePointerMove(event) {
-  if (!state.dragStart) {
-    return;
-  }
-  const next = getCanvasPointer(event);
-  const dx = (next.x - state.dragCurrent.x) * DRAG_SENSITIVITY;
-  const dy = (next.y - state.dragCurrent.y) * DRAG_SENSITIVITY;
-  state.offsetX = clamp(state.offsetX + dx, -OFFSET_LIMIT, OFFSET_LIMIT);
-  state.offsetY = clamp(state.offsetY + dy, -OFFSET_Y_LIMIT, OFFSET_Y_LIMIT);
-  state.dragCurrent = next;
-  renderCanvas();
-  renderCropAnalysis();
-  updateControls();
-}
-
-function handlePointerUp(event) {
-  if (!state.dragStart) {
-    return;
-  }
-  state.dragStart = null;
-  state.dragCurrent = null;
-  renderCanvas();
-  renderCropAnalysis();
-  updateControls();
-  setStatus("Image adjustment updated.");
-}
-
 function handleResize() {
-  renderCanvas();
-}
-
-function waitForOpenCv() {
-  if (window.cv && typeof window.cv.Mat === "function") {
-    markOpenCvReady();
-    return;
-  }
-
-  if (window.cv && !cvState.hooked) {
-    const previous = window.cv.onRuntimeInitialized;
-    window.cv.onRuntimeInitialized = () => {
-      if (typeof previous === "function") {
-        previous();
-      }
-      markOpenCvReady();
-    };
-    cvState.hooked = true;
-  }
-
-  cvState.pollCount += 1;
-  if (cvState.pollCount > 200) {
-    cvState.failed = true;
-    updateEngineChip();
-    return;
-  }
-
-  window.setTimeout(waitForOpenCv, 150);
+  drawViewCanvas();
+  renderCropAnalysis();
 }
 
 function init() {
-  waitForOpenCv();
-  updateEngineChip();
-  drawEmptyCanvas();
+  els.exportCanvas.hidden = true;
   updateDocumentSummary();
   updateControls();
   renderAnalysis(null);
   renderCropAnalysis();
+  drawViewCanvas();
+
   els.uploadForm.addEventListener("submit", handleUpload);
-  els.rotateLeft.addEventListener("click", () => rotate(270));
+  els.rotateLeft.addEventListener("click", () => rotate(-90));
   els.rotateRight.addEventListener("click", () => rotate(90));
   els.resetAdjust.addEventListener("click", resetAdjustments);
   els.extractButton.addEventListener("click", handleExtraction);
-  els.microRotate.addEventListener("input", () => {
-    state.microRotation = Number(els.microRotate.value);
-    renderCanvas();
-    renderCropAnalysis();
-    updateControls();
-  });
-  els.zoomRange.addEventListener("input", () => {
-    state.zoom = Number(els.zoomRange.value);
-    renderCanvas();
-    renderCropAnalysis();
-    updateControls();
-  });
-  els.zoomOut.addEventListener("click", () => {
-    state.zoom = Number(clamp(state.zoom - 0.03, ZOOM_MIN, ZOOM_MAX).toFixed(2));
-    renderCanvas();
-    renderCropAnalysis();
-    updateControls();
-  });
-  els.zoomIn.addEventListener("click", () => {
-    state.zoom = Number(clamp(state.zoom + 0.03, ZOOM_MIN, ZOOM_MAX).toFixed(2));
-    renderCanvas();
-    renderCropAnalysis();
-    updateControls();
-  });
-  els.offsetXRange.addEventListener("input", () => {
-    state.offsetX = Number(els.offsetXRange.value);
-    renderCanvas();
-    renderCropAnalysis();
-    updateControls();
-  });
-  els.offsetYRange.addEventListener("input", () => {
-    state.offsetY = Number(els.offsetYRange.value);
-    renderCanvas();
-    renderCropAnalysis();
-    updateControls();
-  });
+  els.zoomRange.addEventListener("input", () => adjustZoom(Number(els.zoomRange.value)));
+  els.zoomOut.addEventListener("click", () => adjustZoom(state.scale - 0.05));
+  els.zoomIn.addEventListener("click", () => adjustZoom(state.scale + 0.05));
   els.canvas.addEventListener("pointerdown", handlePointerDown);
   els.canvas.addEventListener("pointermove", handlePointerMove);
   els.canvas.addEventListener("pointerup", handlePointerUp);
+  els.canvas.addEventListener("pointercancel", handlePointerUp);
   els.canvas.addEventListener("pointerleave", handlePointerUp);
-  els.canvas.addEventListener("wheel", (event) => {
-    if (!state.previewImage) {
-      return;
-    }
-    event.preventDefault();
-    const nextZoom = clamp(state.zoom + (event.deltaY < 0 ? 0.03 : -0.03), ZOOM_MIN, ZOOM_MAX);
-    state.zoom = Number(nextZoom.toFixed(2));
-    renderCanvas();
-    renderCropAnalysis();
-    updateControls();
-  }, { passive: false });
   window.addEventListener("resize", handleResize);
 }
 

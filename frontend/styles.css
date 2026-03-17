@@ -209,14 +209,13 @@ button:disabled {
 }
 
 .viewer-frame {
+  position: relative;
   border-radius: 22px;
   overflow: hidden;
   height: 540px;
   background:
-    linear-gradient(45deg, rgba(13, 107, 95, 0.07) 25%, transparent 25%, transparent 75%, rgba(13, 107, 95, 0.07) 75%),
-    linear-gradient(45deg, rgba(13, 107, 95, 0.07) 25%, transparent 25%, transparent 75%, rgba(13, 107, 95, 0.07) 75%);
-  background-position: 0 0, 14px 14px;
-  background-size: 28px 28px;
+    radial-gradient(circle at top left, rgba(88, 224, 255, 0.12), transparent 28%),
+    linear-gradient(180deg, #0f1519 0%, #1d252b 100%);
   border: 1px solid var(--line);
   display: flex;
   align-items: center;
@@ -224,7 +223,7 @@ button:disabled {
 }
 
 .viewer-frame.empty {
-  opacity: 0.65;
+  opacity: 0.82;
 }
 
 #preview-canvas {
@@ -232,6 +231,7 @@ button:disabled {
   height: 100%;
   display: block;
   cursor: grab;
+  touch-action: none;
 }
 
 #preview-canvas:active {
@@ -242,12 +242,13 @@ button:disabled {
   margin: 12px 0 0;
   color: var(--muted);
   font-size: 14px;
+  line-height: 1.5;
 }
 
 .adjust-panel {
   margin-top: 14px;
   display: grid;
-  gap: 12px;
+  gap: 14px;
 }
 
 .adjust-panel label {
@@ -271,6 +272,7 @@ button:disabled {
 .zoom-control button {
   min-width: 42px;
   padding: 10px 0;
+  background: linear-gradient(180deg, #0d6b5f 0%, #0a5148 100%);
 }
 
 .side-panel {
