@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import cv2
 import numpy as np
 
 from fastapi.testclient import TestClient
@@ -13,6 +14,7 @@ from api.services.extraction_service import (
     _relocate_api_report,
     create_extraction,
     fetch_extraction_report_path,
+    run_backend_correction,
     should_run_correction,
 )
 
@@ -274,6 +276,7 @@ class TestExtractionModes(unittest.TestCase):
         validate_frontend_input.assert_called_once_with(b"raw-bytes", "sample.jpg", "raw")
         run_backend_correction.assert_called_once_with(
             b"raw-bytes",
+            filename="sample.jpg",
             rotation=0,
             transform=None,
             crop=None,
@@ -311,3 +314,22 @@ class TestExtractionModes(unittest.TestCase):
                     transform=None,
                     use_face_hint=False,
                 )
+
+    def test_run_backend_correction_is_not_noop_when_rotation_applied(self) -> None:
+        image = np.zeros((3, 5, 3), dtype=np.uint8)
+        image[0, 0] = (255, 0, 0)
+        ok, encoded = cv2.imencode(".png", image)
+        self.assertTrue(ok)
+
+        corrected = run_backend_correction(
+            encoded.tobytes(),
+            filename="sample.png",
+            rotation=90,
+            transform=None,
+            crop=None,
+        )
+        self.assertNotEqual(corrected, encoded.tobytes())
+
+        decoded = cv2.imdecode(np.frombuffer(corrected, dtype=np.uint8), cv2.IMREAD_COLOR)
+        self.assertIsNotNone(decoded)
+        self.assertEqual(decoded.shape[:2], (5, 3))

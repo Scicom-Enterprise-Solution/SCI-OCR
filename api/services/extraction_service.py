@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import io
 from contextlib import redirect_stderr, redirect_stdout
 
+import cv2
+
 from api.config import settings
 from db import get_extraction, insert_extraction
 from document_inputs.loader import load_document_input
@@ -13,6 +15,9 @@ from path_utils import from_repo_relative, to_repo_relative
 from pipelines.mrz_pipeline import process_document
 
 from .document_service import fetch_document
+
+
+TRANSFORM_PAD_RATIO = 0.14
 
 
 def _read_bytes(path: str) -> bytes:
@@ -40,29 +45,122 @@ def _relocate_api_report(report_path: str | None, document_id: str) -> str | Non
     return to_repo_relative(target)
 
 
-def _apply_rotation(file_bytes: bytes, rotation: int) -> bytes:
-    return file_bytes
+def _apply_rotation(image_bgr, rotation: int):
+    if rotation == 0:
+        return image_bgr
+    if rotation == 90:
+        return cv2.rotate(image_bgr, cv2.ROTATE_90_CLOCKWISE)
+    if rotation == 180:
+        return cv2.rotate(image_bgr, cv2.ROTATE_180)
+    if rotation == 270:
+        return cv2.rotate(image_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    raise ValueError("rotation must be one of 0, 90, 180, 270")
 
 
-def _apply_transform(file_bytes: bytes, transform: dict | None) -> bytes:
-    return file_bytes
+def _apply_transform(image_bgr, transform: dict | None):
+    if not transform:
+        return image_bgr
+
+    angle = -float(transform.get("micro_rotation", 0.0) or 0.0)
+    zoom = float(transform.get("zoom", 1.0) or 1.0)
+    offset_x = float(transform.get("offset_x", 0.0) or 0.0)
+    offset_y = float(transform.get("offset_y", 0.0) or 0.0)
+    viewport_width = int(transform.get("viewport_width") or 0)
+    viewport_height = int(transform.get("viewport_height") or 0)
+
+    if (
+        abs(angle) < 1e-6
+        and abs(zoom - 1.0) < 1e-6
+        and abs(offset_x) < 1e-6
+        and abs(offset_y) < 1e-6
+        and viewport_width <= 0
+        and viewport_height <= 0
+    ):
+        return image_bgr
+
+    h, w = image_bgr.shape[:2]
+    pad_x = int(round(w * TRANSFORM_PAD_RATIO))
+    pad_y = int(round(h * TRANSFORM_PAD_RATIO))
+    padded = cv2.copyMakeBorder(
+        image_bgr,
+        pad_y,
+        pad_y,
+        pad_x,
+        pad_x,
+        borderType=cv2.BORDER_REPLICATE,
+    )
+    padded_h, padded_w = padded.shape[:2]
+    center = (padded_w / 2.0, padded_h / 2.0)
+    matrix = cv2.getRotationMatrix2D(center, angle, zoom)
+    matrix[0, 2] += offset_x * w
+    matrix[1, 2] += offset_y * h
+
+    if viewport_width > 0 and viewport_height > 0:
+        scale = min(viewport_width / float(w), viewport_height / float(h))
+        render_center = (viewport_width / 2.0, viewport_height / 2.0)
+        render_matrix = matrix.copy()
+        render_matrix[0, 2] += render_center[0] - center[0] * scale
+        render_matrix[1, 2] += render_center[1] - center[1] * scale
+        render_matrix[0, 0] *= scale
+        render_matrix[0, 1] *= scale
+        render_matrix[1, 0] *= scale
+        render_matrix[1, 1] *= scale
+        return cv2.warpAffine(
+            padded,
+            render_matrix,
+            (viewport_width, viewport_height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(255, 255, 255),
+        )
+
+    warped = cv2.warpAffine(
+        padded,
+        matrix,
+        (padded_w, padded_h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    return warped[pad_y:pad_y + h, pad_x:pad_x + w]
 
 
-def _apply_crop(file_bytes: bytes, crop: dict | None) -> bytes:
-    return file_bytes
+def _apply_crop(image_bgr, crop: dict | None):
+    if not crop:
+        return image_bgr
+
+    h, w = image_bgr.shape[:2]
+    x1 = int(round(crop["x"] * w))
+    y1 = int(round(crop["y"] * h))
+    x2 = int(round((crop["x"] + crop["width"]) * w))
+    y2 = int(round((crop["y"] + crop["height"]) * h))
+
+    x1 = max(0, min(x1, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    x2 = max(x1 + 1, min(x2, w))
+    y2 = max(y1 + 1, min(y2, h))
+    return image_bgr[y1:y2, x1:x2]
+
+
+def _encode_png(image_bgr) -> bytes:
+    ok, data = cv2.imencode(".png", image_bgr)
+    if not ok:
+        raise RuntimeError("Failed to encode corrected image as PNG.")
+    return data.tobytes()
 
 
 def run_backend_correction(
     file_bytes: bytes,
     *,
+    filename: str,
     rotation: int,
     transform: dict | None,
     crop: dict | None,
 ) -> bytes:
-    corrected = _apply_rotation(file_bytes, rotation)
+    loaded = load_document_input(file_bytes=file_bytes, filename=filename)
+    corrected = _apply_rotation(loaded.image_bgr, rotation)
     corrected = _apply_transform(corrected, transform)
     corrected = _apply_crop(corrected, crop)
-    return corrected
+    return _encode_png(corrected)
 
 
 def should_run_correction(input_mode: str, enable_correction: bool | None) -> bool:
@@ -112,6 +210,7 @@ def create_extraction(
     if correction_applied:
         pipeline_bytes = run_backend_correction(
             pipeline_bytes,
+            filename=document["filename"],
             rotation=rotation,
             transform=transform,
             crop=crop,

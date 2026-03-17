@@ -25,6 +25,8 @@ Do not expand scope to TD1, TD2, visas, residence permits, or other MRTD formats
 - API report files belong under `storage/reports/`.
 - CLI reference/regression combined reports belong under `samples/reports/`.
 - Per-sample pipeline reports still belong under `output/<sample>/`.
+- Frontend editing is now frontend-authoritative: the browser renders the final image and uploads that final raster through `/api/uploads`.
+- Backend preview fetching/editing is deprecated for the frontend flow and must not be reintroduced silently.
 - After OCR failures, inspect the generated per-sample report files under `output/<sample>/`. These contain deeper details than the terminal summary and should drive mismatch analysis.
 - Prefer repo-relative serialized paths over absolute paths in reports, DB records, and API responses. Internal absolute resolution is fine only at the point of file access.
 - Keep cross-platform portability in mind. Stored path strings should remain portable across Linux, WSL, and Windows.
@@ -322,8 +324,15 @@ Current API shape:
 Current API behavior:
 - Uploads are deduplicated by SHA-256 hash.
 - `document_id` is the primary handle for later extraction.
-- Extraction only requires `document_id`; `crop`, `rotation`, and `use_face_hint` are optional.
+- Extraction supports `input_mode` (`raw` or `frontend`) and `enable_correction` as explicit correction controls.
+- Extraction only requires `document_id`; `input_mode`, `enable_correction`, `crop`, `rotation`, `transform`, and `use_face_hint` are optional.
 - `use_face_hint` should default to `False` unless explicitly requested.
+- Correction decision rules are:
+  - `enable_correction=True` -> run correction
+  - `input_mode="raw"` with no explicit override -> run correction
+  - `input_mode="frontend"` with no explicit override -> skip correction
+- Frontend mode treats the uploaded file as already geometry-corrected input and should not silently reapply frontend transforms.
+- Frontend mode rejects undersized uploads below `600x400` rather than trying to repair them.
 - API extraction should suppress internal Stage 1/2/3 debug spam when `DEBUG=False`.
 
 Path/report conventions:

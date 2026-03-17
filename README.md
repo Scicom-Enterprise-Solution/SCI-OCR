@@ -55,7 +55,7 @@ The project loads values from `.env` automatically (if present).
 - `ALIGNED_MAX_DIM` - Maximum longest-side dimension for the aligned passport working image before Stage 2/3
 - `API_HOST` - API bind host
 - `API_PORT` - API bind port
-- `API_STORAGE_DIR` - API storage root for uploads, previews, reports, and SQLite DB
+- `API_STORAGE_DIR` - API storage root for uploads, reports, exports, and SQLite DB
 - `API_DB_PATH` - SQLite DB path for the API layer
 
 For better MRZ accuracy, an OCR-B model can be added manually to the Tesseract tessdata directory. In this environment, `ocrb.traineddata` was installed and the local `.env` uses `ocrb`. For accuracy-first extraction, keep `FAST_OCR=False`.
@@ -100,7 +100,6 @@ Large-image note:
 The repository includes a FastAPI server and SQLite-backed storage layer for:
 
 - uploads
-- preview generation
 - extraction
 - reviewer corrections / reference truth
 
@@ -127,35 +126,61 @@ Current API routes:
 - `POST /api/extractions`
 - `GET /api/references`
 - `POST /api/references`
-- `GET /storage/...`
 
 Upload response now includes:
 
 - `document_id`
 - `file_hash`
 - `deduplicated`
-- `preview_path`
+- `preview_width`
+- `preview_height`
 
-Extraction request only requires:
+Minimal extraction request:
 
 ```json
 {
-  "document_id": "..."
+  "document_id": "...",
+  "input_mode": "raw"
 }
 ```
 
 Optional fields:
 
+- `input_mode` - `raw` or `frontend`
+- `enable_correction`
 - `crop`
 - `rotation`
+- `transform`
 - `use_face_hint`
 
-Default extraction behavior:
+Correction rules:
 
-- original source image/page
-- no crop
-- no rotation
-- no face detection unless explicitly requested
+- `enable_correction=true` -> force backend correction
+- `input_mode="raw"` with no explicit override -> backend correction runs
+- `input_mode="frontend"` with no explicit override -> backend correction is skipped
+
+Frontend-authoritative flow:
+
+- the frontend renders the final image locally
+- the frontend uploads that final image through `POST /api/uploads`
+- the backend does not fetch or serve preview images for frontend editing
+- the backend does not replay frontend transform/crop in `frontend` mode
+
+CLI/API manual flow:
+
+- raw uploads still work through `POST /api/uploads`
+- correction can be controlled explicitly at extraction time
+- `use_face_hint` is only meaningful when correction is enabled
+
+Example frontend-style extraction request:
+
+```json
+{
+  "document_id": "...",
+  "input_mode": "frontend",
+  "enable_correction": false
+}
+```
 
 Notes:
 
@@ -163,13 +188,26 @@ Notes:
 - The API is intended to run as a long-lived process, so Paddle stays warm across requests.
 - API report files are written under `storage/reports/`.
 - API paths returned in JSON are repo-relative for portability.
+- Frontend-mode uploads smaller than `600x400` are rejected instead of being auto-corrected.
+
+CLI API client:
+
+```bash
+./.venv/bin/python scripts/api_client.py samples/11.png --input-mode raw
+./.venv/bin/python scripts/api_client.py samples/11.png --input-mode frontend --disable-correction
+./.venv/bin/python scripts/api_client.py samples/11.png --input-mode frontend --enable-correction
+```
+
+Useful options:
+
+- `--save <path>` - write upload/extraction response JSON
+- `--report-save <path>` - download `/api/extractions/{id}/report`
 
 ## Storage And Reports
 
 Runtime storage is kept outside git under `storage/`:
 
 - `storage/uploads/`
-- `storage/previews/`
 - `storage/reports/`
 - `storage/mrz.sqlite3`
 
@@ -339,7 +377,6 @@ Typical files include:
 API runtime files are written under `storage/`:
 
 - `storage/uploads/`
-- `storage/previews/`
 - `storage/reports/`
 - `storage/mrz.sqlite3`
 
