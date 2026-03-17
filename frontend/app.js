@@ -4,10 +4,12 @@ const state = {
   previewImage: null,
   scale: 1,
   rotation: 0,
+  fineRotation: 0,
   offsetX: 0,
   offsetY: 0,
   dragPointer: null,
   dragOrigin: null,
+  dragMode: null,
   viewBaseScale: 1,
   viewSize: { width: 720, height: 480 },
   isBusy: false,
@@ -24,6 +26,7 @@ const els = {
   rotateRight: document.querySelector("#rotate-right"),
   resetAdjust: document.querySelector("#reset-adjust"),
   extractButton: document.querySelector("#extract-button"),
+  angleRange: document.querySelector("#angle-range"),
   zoomOut: document.querySelector("#zoom-out"),
   zoomIn: document.querySelector("#zoom-in"),
   zoomRange: document.querySelector("#zoom-range"),
@@ -48,11 +51,13 @@ const exportCtx = els.exportCanvas.getContext("2d");
 
 const VIEW_MIN_WIDTH = 320;
 const VIEW_MIN_HEIGHT = 240;
+const CAPTURE_ASPECT_RATIO = 4 / 3;
 const ZOOM_MIN = 0.85;
 const ZOOM_MAX = 2.4;
 const MRZ_GUIDE_HEIGHT_RATIO = 0.23;
-const MRZ_GUIDE_WIDTH_RATIO = 0.82;
+const MRZ_GUIDE_WIDTH_RATIO = 0.92;
 const MRZ_GUIDE_BOTTOM_MARGIN_RATIO = 0.08;
+const ROTATE_DRAG_SENSITIVITY = 0.024;
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -95,12 +100,14 @@ function updateControls() {
   els.extractButton.disabled = !hasDocument || state.isBusy;
   els.uploadButton.disabled = state.isBusy;
   els.fileInput.disabled = state.isBusy;
+  els.angleRange.disabled = !hasDocument || state.isBusy;
   els.zoomOut.disabled = !hasDocument || state.isBusy;
   els.zoomIn.disabled = !hasDocument || state.isBusy;
   els.zoomRange.disabled = !hasDocument || state.isBusy;
-  els.rotationChip.textContent = `rotation: ${state.rotation}`;
+  els.rotationChip.textContent = `rotation: ${getRenderRotation().toFixed(1)}`;
   els.docIdChip.textContent = `document: ${state.documentId || "-"}`;
   els.engineChip.textContent = "render: dual canvas";
+  els.angleRange.value = String(state.fineRotation);
   els.zoomRange.value = String(state.scale);
   updatePayloadView();
 }
@@ -118,10 +125,12 @@ function updateDocumentSummary() {
 function resetAdjustments() {
   state.scale = 1;
   state.rotation = 0;
+  state.fineRotation = 0;
   state.offsetX = 0;
   state.offsetY = 0;
   state.dragPointer = null;
   state.dragOrigin = null;
+  state.dragMode = null;
   drawViewCanvas();
   renderCropAnalysis();
   updateControls();
@@ -133,6 +142,7 @@ function resetViewAdjustments() {
   state.offsetY = 0;
   state.dragPointer = null;
   state.dragOrigin = null;
+  state.dragMode = null;
 }
 
 function loadImage(file) {
@@ -152,24 +162,38 @@ function loadImage(file) {
 }
 
 function getViewSize() {
-  const width = Math.max(VIEW_MIN_WIDTH, Math.round(els.viewerFrame.clientWidth || VIEW_MIN_WIDTH));
-  const height = Math.max(VIEW_MIN_HEIGHT, Math.round(els.viewerFrame.clientHeight || VIEW_MIN_HEIGHT));
+  const availableWidth = Math.max(VIEW_MIN_WIDTH, Math.round(els.viewerFrame.clientWidth || VIEW_MIN_WIDTH));
+  const availableHeight = Math.max(VIEW_MIN_HEIGHT, Math.round(els.viewerFrame.clientHeight || VIEW_MIN_HEIGHT));
+  let width = availableWidth;
+  let height = Math.round(width / CAPTURE_ASPECT_RATIO);
+
+  if (height > availableHeight) {
+    height = availableHeight;
+    width = Math.round(height * CAPTURE_ASPECT_RATIO);
+  }
+
   return { width, height };
 }
 
 function getNormalizedRotation() {
-  return ((state.rotation % 360) + 360) % 360;
+  return ((getRenderRotation() % 360) + 360) % 360;
+}
+
+function getRenderRotation() {
+  return state.rotation + state.fineRotation;
 }
 
 function getImageDisplaySize() {
   if (!state.previewImage) {
     return { width: 0, height: 0 };
   }
-  const rotation = getNormalizedRotation();
-  if (rotation === 90 || rotation === 270) {
-    return { width: state.previewImage.height, height: state.previewImage.width };
-  }
-  return { width: state.previewImage.width, height: state.previewImage.height };
+  const radians = (getNormalizedRotation() * Math.PI) / 180;
+  const cos = Math.abs(Math.cos(radians));
+  const sin = Math.abs(Math.sin(radians));
+  return {
+    width: (state.previewImage.width * cos) + (state.previewImage.height * sin),
+    height: (state.previewImage.width * sin) + (state.previewImage.height * cos),
+  };
 }
 
 function computeViewBaseScale() {
@@ -205,7 +229,7 @@ function renderImage(targetCtx, canvas, baseScale, backgroundFill) {
   targetCtx.imageSmoothingQuality = "high";
   targetCtx.save();
   targetCtx.translate(canvas.width / 2, canvas.height / 2);
-  targetCtx.rotate((state.rotation * Math.PI) / 180);
+  targetCtx.rotate((getRenderRotation() * Math.PI) / 180);
   targetCtx.scale(baseScale * state.scale, baseScale * state.scale);
   targetCtx.drawImage(
     image,
@@ -233,7 +257,7 @@ function getTransformedImageBounds() {
   const image = state.previewImage;
   const scale = state.viewBaseScale * state.scale;
   const offsetPixels = getImageOffsetPixels();
-  const radians = (state.rotation * Math.PI) / 180;
+  const radians = (getRenderRotation() * Math.PI) / 180;
   const cos = Math.cos(radians);
   const sin = Math.sin(radians);
   const cx = state.viewSize.width / 2;
@@ -269,11 +293,14 @@ function drawMrzOverlay() {
   viewCtx.rect(rect.x, rect.y, rect.width, rect.height);
   viewCtx.fill("evenodd");
 
-  viewCtx.strokeStyle = "rgba(88, 224, 255, 0.72)";
-  viewCtx.lineWidth = 1.5;
+  viewCtx.strokeStyle = "rgba(255, 90, 90, 0.78)";
+  viewCtx.lineWidth = 1.4;
+  viewCtx.shadowColor = "rgba(255, 96, 96, 0.38)";
+  viewCtx.shadowBlur = 12;
   viewCtx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+  viewCtx.shadowBlur = 0;
 
-  viewCtx.fillStyle = "rgba(196, 244, 255, 0.88)";
+  viewCtx.fillStyle = "rgba(255, 228, 228, 0.92)";
   viewCtx.font = '600 13px "Segoe UI", sans-serif';
   viewCtx.textAlign = "left";
   viewCtx.fillText("Align MRZ here", rect.x, labelY);
@@ -290,23 +317,35 @@ function drawScanAnimation(timestampMs) {
 
   const rect = computeMrzGuideRect();
   const elapsed = (timestampMs - state.animationStartMs) / 1000;
-  const wave = (Math.sin(elapsed * 1.4) + 1) / 2;
+  const wave = (Math.sin(elapsed * 1.1) + 1) / 2;
   const y = rect.y + (wave * rect.height);
 
   viewCtx.save();
   viewCtx.beginPath();
   viewCtx.rect(rect.x, rect.y, rect.width, rect.height);
   viewCtx.clip();
-  const gradient = viewCtx.createLinearGradient(rect.x, y - 8, rect.x, y + 8);
-  gradient.addColorStop(0, "rgba(88, 224, 255, 0)");
-  gradient.addColorStop(0.5, "rgba(88, 224, 255, 0.6)");
-  gradient.addColorStop(1, "rgba(88, 224, 255, 0)");
-  viewCtx.strokeStyle = gradient;
-  viewCtx.lineWidth = 2;
+  const glow = viewCtx.createLinearGradient(rect.x, y - 18, rect.x, y + 18);
+  glow.addColorStop(0, "rgba(255, 72, 72, 0)");
+  glow.addColorStop(0.35, "rgba(255, 92, 92, 0.18)");
+  glow.addColorStop(0.5, "rgba(255, 124, 124, 0.4)");
+  glow.addColorStop(0.65, "rgba(255, 92, 92, 0.18)");
+  glow.addColorStop(1, "rgba(255, 72, 72, 0)");
+  viewCtx.fillStyle = glow;
+  viewCtx.fillRect(rect.x, y - 18, rect.width, 36);
+
+  const lineGradient = viewCtx.createLinearGradient(rect.x, y - 3, rect.x, y + 3);
+  lineGradient.addColorStop(0, "rgba(255, 160, 160, 0)");
+  lineGradient.addColorStop(0.5, "rgba(255, 84, 84, 0.95)");
+  lineGradient.addColorStop(1, "rgba(255, 160, 160, 0)");
+  viewCtx.strokeStyle = lineGradient;
+  viewCtx.lineWidth = 2.2;
+  viewCtx.shadowColor = "rgba(255, 72, 72, 0.65)";
+  viewCtx.shadowBlur = 10;
   viewCtx.beginPath();
   viewCtx.moveTo(rect.x + 10, y);
   viewCtx.lineTo(rect.x + rect.width - 10, y);
   viewCtx.stroke();
+  viewCtx.shadowBlur = 0;
   viewCtx.restore();
 }
 
@@ -365,13 +404,22 @@ function drawExportCanvas() {
   if (!state.previewImage) {
     return;
   }
-  els.exportCanvas.width = state.previewImage.width;
-  els.exportCanvas.height = state.previewImage.height;
-  const scaleUp = Math.min(
+  const viewAspect = state.viewSize.width / state.viewSize.height;
+  const sourceAspect = state.previewImage.width / state.previewImage.height;
+
+  if (sourceAspect >= viewAspect) {
+    els.exportCanvas.height = state.previewImage.height;
+    els.exportCanvas.width = Math.round(state.previewImage.height * viewAspect);
+  } else {
+    els.exportCanvas.width = state.previewImage.width;
+    els.exportCanvas.height = Math.round(state.previewImage.width / viewAspect);
+  }
+
+  const exportScale = Math.min(
     els.exportCanvas.width / state.viewSize.width,
     els.exportCanvas.height / state.viewSize.height,
   );
-  renderImage(exportCtx, els.exportCanvas, state.viewBaseScale * scaleUp, "#ffffff");
+  renderImage(exportCtx, els.exportCanvas, state.viewBaseScale * exportScale, "#ffffff");
 }
 
 function dataUrlToBlob(dataUrl) {
@@ -518,7 +566,8 @@ function buildAdjustmentCards() {
     {
       title: "Adjustment Geometry",
       items: [
-        `Rotation: ${state.rotation} degrees`,
+        `Rotation: ${state.rotation.toFixed(1)} degrees`,
+        `Fine angle: ${state.fineRotation.toFixed(1)} degrees`,
         `Scale: ${state.scale.toFixed(2)}x`,
         `Offset: x=${state.offsetX.toFixed(3)}, y=${state.offsetY.toFixed(3)}`,
       ],
@@ -583,6 +632,7 @@ function handlePointerDown(event) {
   els.canvas.setPointerCapture(event.pointerId);
   state.dragPointer = event.pointerId;
   state.dragOrigin = getCanvasPointer(event);
+  state.dragMode = event.altKey ? "rotate" : "pan";
 }
 
 function handlePointerMove(event) {
@@ -592,8 +642,17 @@ function handlePointerMove(event) {
   const next = getCanvasPointer(event);
   const dx = next.x - state.dragOrigin.x;
   const dy = next.y - state.dragOrigin.y;
+  if (state.dragMode === "rotate") {
+    state.fineRotation = Number(clamp(state.fineRotation + (dx * ROTATE_DRAG_SENSITIVITY), -12, 12).toFixed(1));
+    state.dragOrigin = next;
+    drawViewCanvas();
+    renderCropAnalysis();
+    updateControls();
+    setStatus(getGuideStatus());
+    return;
+  }
   const effectiveScale = state.viewBaseScale * state.scale;
-  const radians = (state.rotation * Math.PI) / 180;
+  const radians = (getRenderRotation() * Math.PI) / 180;
   const cos = Math.cos(radians);
   const sin = Math.sin(radians);
   if (effectiveScale > 0 && state.previewImage) {
@@ -615,6 +674,7 @@ function handlePointerUp(event) {
   els.canvas.releasePointerCapture(event.pointerId);
   state.dragPointer = null;
   state.dragOrigin = null;
+  state.dragMode = null;
   renderCropAnalysis();
   setStatus(getGuideStatus());
 }
@@ -672,7 +732,8 @@ function rotate(delta) {
   if (!state.previewImage) {
     return;
   }
-  state.rotation = (state.rotation + delta + 360) % 360;
+  state.rotation = Number((state.rotation + delta).toFixed(1));
+  state.fineRotation = 0;
   resetViewAdjustments();
   drawViewCanvas();
   setStatus(getGuideStatus());
@@ -752,6 +813,13 @@ function init() {
   els.rotateRight.addEventListener("click", () => rotate(90));
   els.resetAdjust.addEventListener("click", resetAdjustments);
   els.extractButton.addEventListener("click", handleExtraction);
+  els.angleRange.addEventListener("input", () => {
+    state.fineRotation = Number(els.angleRange.value);
+    drawViewCanvas();
+    renderCropAnalysis();
+    updateControls();
+    setStatus(getGuideStatus());
+  });
   els.zoomRange.addEventListener("input", () => adjustZoom(Number(els.zoomRange.value)));
   els.zoomOut.addEventListener("click", () => adjustZoom(state.scale - 0.05));
   els.zoomIn.addEventListener("click", () => adjustZoom(state.scale + 0.05));

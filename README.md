@@ -115,6 +115,8 @@ Run the API server:
 ./.venv/bin/python scripts/run_api_dev.py
 ```
 
+By default the dev runner now binds to `0.0.0.0`. Override with `API_DEV_HOST` if needed.
+
 Default API docs:
 
 - [http://127.0.0.1:3000/docs](http://127.0.0.1:3000/docs)
@@ -166,6 +168,7 @@ Frontend-authoritative flow:
 - the backend does not fetch or serve preview images for frontend editing
 - the backend does not replay frontend transform/crop in `frontend` mode
 - in `frontend` mode, geometry is final and authoritative; the backend must not accept or replay `crop`, `transform`, or `rotation` metadata
+- frontend requests that still include `crop`, `transform`, or non-zero `rotation` are rejected with a clear API error instead of being silently ignored
 
 CLI/API manual flow:
 
@@ -190,6 +193,9 @@ Notes:
 - API report files are written under `storage/reports/`.
 - API paths returned in JSON are repo-relative for portability.
 - Frontend-mode uploads smaller than `600x400` are rejected instead of being auto-corrected.
+- Correction reporting now distinguishes:
+  - `enable_correction` = user-provided request value
+  - `correction_applied` = actual execution result
 
 CLI API client:
 
@@ -203,6 +209,79 @@ Useful options:
 
 - `--save <path>` - write upload/extraction response JSON
 - `--report-save <path>` - download `/api/extractions/{id}/report`
+
+API contract regression script:
+
+```bash
+bash scripts/test_api_contract.sh
+```
+
+This covers:
+
+- raw mode default correction
+- frontend mode without correction
+- frontend mode with explicit correction override
+- frontend rejection of `crop`, `transform`, and non-zero `rotation`
+- raw mode acceptance of correction inputs
+- optional frontend small-image rejection
+- full warm Paddle regression run
+
+The script now uses the project Python for JSON parsing and does not require `jq`.
+
+## Frontend Demo Workbench
+
+The current frontend is a pure HTML + JavaScript document-capture workbench served from `/frontend`.
+
+Key design points:
+
+- no framework
+- no OpenCV.js
+- no CSS image transforms for document rendering
+- view rendering uses a visible canvas only
+- export rendering uses a hidden canvas only
+
+Dual-canvas architecture:
+
+- **View canvas**:
+  - sized for the browser UI
+  - used for rotate, zoom, drag, guide overlay, and animation
+- **Export canvas**:
+  - always uses the original uploaded image resolution
+  - renders the same transformation state as the view canvas
+  - is used only to generate the uploaded final image
+
+Frontend state is intentionally minimal:
+
+- `scale`
+- `rotation`
+- `offsetX`
+- `offsetY`
+
+The backend never receives frontend geometry metadata. On extraction, the browser:
+
+1. renders the final image into the hidden export canvas
+2. exports it as JPEG
+3. uploads that final raster through `POST /api/uploads`
+4. calls `POST /api/extractions` with:
+
+```json
+{
+  "document_id": "...",
+  "input_mode": "frontend",
+  "enable_correction": false
+}
+```
+
+MRZ guidance overlay:
+
+- appears on the view canvas only
+- is not included in the export canvas
+- includes a subtle MRZ guide box near the bottom and a lightweight scanning-line animation
+
+Important export rule:
+
+- what the user sees in the preview is the composition that gets exported
+- the export canvas uses original resolution, but the same framing
 
 ## Storage And Reports
 

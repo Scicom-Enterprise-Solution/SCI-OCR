@@ -210,9 +210,10 @@ button:disabled {
 
 .viewer-frame {
   position: relative;
-  border-radius: 22px;
+  border-radius: 8px;
   overflow: hidden;
-  height: 540px;
+  width: 100%;
+  aspect-ratio: 4 / 3;
   background:
     radial-gradient(circle at top left, rgba(88, 224, 255, 0.12), transparent 28%),
     linear-gradient(180deg, #0f1519 0%, #1d252b 100%);
@@ -227,8 +228,10 @@ button:disabled {
 }
 
 #preview-canvas {
-  width: 100%;
-  height: 100%;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
   display: block;
   cursor: grab;
   touch-action: none;
@@ -436,6 +439,6 @@ pre,
   }
 
   .viewer-frame {
-    height: 420px;
+    aspect-ratio: 4 / 3;
   }
 }

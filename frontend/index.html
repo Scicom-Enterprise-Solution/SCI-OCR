@@ -57,9 +57,13 @@
             <canvas id="export-canvas" hidden></canvas>
           </div>
           <p class="viewer-help">
-            Drag to position the page, rotate in 90-degree steps, and use zoom for final alignment before extraction.
+            Drag to position the page, rotate in 90-degree steps, use the angle slider for fine correction, or hold Alt while dragging to fine-rotate with the mouse.
           </p>
           <div class="adjust-panel">
+            <label>
+              <span>Angle</span>
+              <input id="angle-range" type="range" min="-12" max="12" step="0.1" value="0">
+            </label>
             <label>
               <span>Zoom</span>
               <div class="zoom-control">
