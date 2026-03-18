@@ -57,6 +57,10 @@ The project loads values from `.env` automatically (if present).
 - `API_PORT` - API bind port
 - `API_STORAGE_DIR` - API storage root for uploads, reports, exports, and SQLite DB
 - `API_DB_PATH` - SQLite DB path for the API layer
+- `LLM_API_BASE_URL` - OpenAI-compatible LLM base URL, for example `http://127.0.0.1:11434/v1` or `http://127.0.0.1:8000/v1`
+- `LLM_API_KEY` - Optional bearer token for compatible hosted providers
+- `LLM_MODEL` - Default chat model name used by the API LLM route
+- `LLM_TIMEOUT_SECONDS` - HTTP timeout for upstream LLM requests
 
 For better MRZ accuracy, an OCR-B model can be added manually to the Tesseract tessdata directory. In this environment, `ocrb.traineddata` was installed and the local `.env` uses `ocrb`. For accuracy-first extraction, keep `FAST_OCR=False`.
 
@@ -126,6 +130,8 @@ Current API routes:
 - `GET /api/health`
 - `POST /api/uploads`
 - `POST /api/extractions`
+- `GET /api/llm/health`
+- `POST /api/llm/chat`
 - `GET /api/references`
 - `POST /api/references`
 
@@ -227,6 +233,52 @@ This covers:
 - full warm Paddle regression run
 
 The script now uses the project Python for JSON parsing and does not require `jq`.
+
+## OpenAI-Compatible LLM Hook
+
+The API now includes a small provider-agnostic LLM layer for OpenAI-compatible backends such as:
+
+- Ollama with its OpenAI-compatible API
+- vLLM
+- hosted providers that expose `POST /v1/chat/completions`
+
+Set these env vars:
+
+```bash
+LLM_API_BASE_URL=http://127.0.0.1:11434/v1
+LLM_MODEL=llama3.1:8b
+```
+
+Optional auth:
+
+```bash
+LLM_API_KEY=your-token
+```
+
+Health check:
+
+```bash
+curl http://127.0.0.1:3000/api/llm/health
+```
+
+Chat request:
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/llm/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "system", "content": "You summarize MRZ extraction issues."},
+      {"role": "user", "content": "Explain why line 2 checksum failures matter."}
+    ]
+  }'
+```
+
+The project-side integration is intentionally narrow:
+
+- the MRZ extraction pipeline remains separate from LLM calls
+- the API speaks the OpenAI-compatible chat-completions shape
+- provider selection stays in environment config, so Ollama, vLLM, or hosted endpoints can be swapped without changing project code
 
 ## Docker Dev Workflow
 

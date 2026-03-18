@@ -29,6 +29,18 @@ class ExtractionRequest(BaseModel):
     use_face_hint: bool = Field(default=False)
 
 
+class LLMMessage(BaseModel):
+    role: str = Field(pattern="^(system|user|assistant)$")
+    content: str = Field(min_length=1)
+
+
+class LLMChatRequest(BaseModel):
+    messages: list[LLMMessage] = Field(min_length=1)
+    model: str | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(default=None, ge=1, le=8192)
+
+
 class ReferenceCorrectionRequest(BaseModel):
     document_id: str
     line1: str
@@ -57,6 +69,13 @@ class ExtractionResponse(BaseModel):
     duration_ms: float | None = None
     report_path: str | None = None
     document_id: str
+
+
+class LLMChatResponse(BaseModel):
+    provider: str
+    model: str
+    content: str
+    raw: dict[str, Any]
 
 
 class ReferenceCorrectionResponse(BaseModel):

@@ -2,13 +2,17 @@ import os
 import tempfile
 import unittest
 from unittest import mock
+from urllib import error
 
 import cv2
 import numpy as np
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from api.app import app
+from api.routes.llm import chat, llm_health
+from api.schemas import LLMChatRequest
 from api.services import document_service
 from api.services.extraction_service import (
     _relocate_api_report,
@@ -17,6 +21,7 @@ from api.services.extraction_service import (
     run_backend_correction,
     should_run_correction,
 )
+from api.services.llm_service import _extract_content, run_chat_completion
 
 
 class TestAPIRoutes(unittest.TestCase):
@@ -61,6 +66,62 @@ class TestAPIRoutes(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["content-type"], "application/json")
+
+    def test_llm_health_route_reflects_configuration_state(self) -> None:
+        with mock.patch("api.routes.llm.is_llm_enabled", return_value=True), \
+             mock.patch("api.routes.llm.settings.llm_api_base_url", "http://127.0.0.1:11434/v1"), \
+             mock.patch("api.routes.llm.settings.llm_model", "llama3.1:8b"):
+            response = llm_health()
+
+        self.assertEqual(
+            response,
+            {"enabled": True, "base_url": True, "model": True},
+        )
+
+    def test_llm_chat_route_returns_provider_response(self) -> None:
+        with mock.patch(
+            "api.routes.llm.run_chat_completion",
+            return_value={
+                "provider": "http://127.0.0.1:11434/v1",
+                "model": "llama3.1:8b",
+                "content": "Checksum mismatches reduce trust in line 2 parsing.",
+                "raw": {"choices": [{"message": {"content": "Checksum mismatches reduce trust in line 2 parsing."}}]},
+            },
+        ) as run_chat_completion_mock:
+            response = chat(
+                LLMChatRequest(
+                    messages=[
+                        {"role": "user", "content": "Explain checksum mismatches."},
+                    ]
+                )
+            )
+
+        self.assertEqual(
+            response.content,
+            "Checksum mismatches reduce trust in line 2 parsing.",
+        )
+        _, kwargs = run_chat_completion_mock.call_args
+        self.assertEqual(
+            kwargs["messages"],
+            [{"role": "user", "content": "Explain checksum mismatches."}],
+        )
+
+    def test_llm_chat_route_maps_not_configured_to_503(self) -> None:
+        with mock.patch(
+            "api.routes.llm.run_chat_completion",
+            side_effect=ValueError("LLM integration is not configured"),
+        ):
+            with self.assertRaises(HTTPException) as exc:
+                chat(
+                    LLMChatRequest(
+                        messages=[
+                        {"role": "user", "content": "Hello"},
+                        ]
+                    )
+                )
+
+        self.assertEqual(exc.exception.status_code, 503)
+        self.assertEqual(exc.exception.detail, "LLM integration is not configured")
 
 
 class TestDocumentDeduplication(unittest.TestCase):
@@ -241,6 +302,95 @@ class TestExtractionModes(unittest.TestCase):
         self.assertEqual(record["rotation"], 0)
         self.assertIsNone(record["transform"])
         self.assertIsNone(record["crop"])
+
+
+class TestLLMService(unittest.TestCase):
+    def test_extract_content_supports_string_message_content(self) -> None:
+        payload = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "Use line 2 checksums as the stronger signal.",
+                    }
+                }
+            ]
+        }
+
+        self.assertEqual(
+            _extract_content(payload),
+            "Use line 2 checksums as the stronger signal.",
+        )
+
+    def test_extract_content_supports_text_parts(self) -> None:
+        payload = {
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Line 2 is checksum-backed."},
+                            {"type": "text", "text": "Treat it as structurally stronger."},
+                        ],
+                    }
+                }
+            ]
+        }
+
+        self.assertEqual(
+            _extract_content(payload),
+            "Line 2 is checksum-backed.\nTreat it as structurally stronger.",
+        )
+
+    def test_run_chat_completion_sends_openai_compatible_request(self) -> None:
+        response_payload = {
+            "model": "llama3.1:8b",
+            "choices": [
+                {
+                    "message": {
+                        "content": "MRZ line 2 is more trustworthy because checksums constrain it.",
+                    }
+                }
+            ],
+        }
+
+        response_mock = mock.MagicMock()
+        response_mock.read.return_value = str(response_payload).replace("'", '"').encode("utf-8")
+        response_mock.__enter__.return_value = response_mock
+        response_mock.__exit__.return_value = False
+
+        with mock.patch("api.services.llm_service.is_llm_enabled", return_value=True), \
+             mock.patch("api.services.llm_service.settings.llm_api_base_url", "http://127.0.0.1:11434/v1"), \
+             mock.patch("api.services.llm_service.settings.llm_model", "llama3.1:8b"), \
+             mock.patch("api.services.llm_service.settings.llm_api_key", ""), \
+             mock.patch("api.services.llm_service.settings.llm_timeout_seconds", 12.0), \
+             mock.patch("api.services.llm_service.request.urlopen", return_value=response_mock) as urlopen_mock:
+            result = run_chat_completion(
+                messages=[{"role": "user", "content": "Why is line 2 stronger?"}],
+                temperature=0.2,
+                max_tokens=120,
+            )
+
+        self.assertEqual(result["model"], "llama3.1:8b")
+        self.assertIn("checksum", result["content"].lower())
+        sent_request = urlopen_mock.call_args.args[0]
+        self.assertEqual(sent_request.full_url, "http://127.0.0.1:11434/v1/chat/completions")
+
+    def test_run_chat_completion_surfaces_http_errors(self) -> None:
+        http_error = error.HTTPError(
+            url="http://127.0.0.1:11434/v1/chat/completions",
+            code=500,
+            msg="Internal Server Error",
+            hdrs=None,
+            fp=mock.Mock(read=mock.Mock(return_value=b'{"error":"boom"}')),
+        )
+
+        with mock.patch("api.services.llm_service.is_llm_enabled", return_value=True), \
+             mock.patch("api.services.llm_service.settings.llm_api_base_url", "http://127.0.0.1:11434/v1"), \
+             mock.patch("api.services.llm_service.settings.llm_model", "llama3.1:8b"), \
+             mock.patch("api.services.llm_service.settings.llm_api_key", ""), \
+             mock.patch("api.services.llm_service.settings.llm_timeout_seconds", 12.0), \
+             mock.patch("api.services.llm_service.request.urlopen", side_effect=http_error):
+            with self.assertRaisesRegex(RuntimeError, "LLM request failed"):
+                run_chat_completion(messages=[{"role": "user", "content": "Hello"}])
 
     def test_create_extraction_frontend_mode_rejects_crop(self) -> None:
         with mock.patch(

@@ -28,6 +28,10 @@ class APISettings:
             "CORS_ALLOW_CREDENTIALS",
             False,
         )
+        self.llm_api_base_url = os.getenv("LLM_API_BASE_URL", "").strip()
+        self.llm_api_key = os.getenv("LLM_API_KEY", "").strip()
+        self.llm_model = os.getenv("LLM_MODEL", "").strip()
+        self.llm_timeout_seconds = float(os.getenv("LLM_TIMEOUT_SECONDS", "60").strip() or "60")
 
     @staticmethod
     def _parse_csv_env(name: str, default: list[str]) -> list[str]:
