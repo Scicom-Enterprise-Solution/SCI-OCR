@@ -12,6 +12,35 @@ class APISettings:
         self.api_port = int(os.getenv("API_PORT", "3000"))
         self.storage_root = os.path.abspath(os.getenv("API_STORAGE_DIR", "storage"))
         self.db_path = os.path.abspath(os.getenv("API_DB_PATH", os.path.join(self.storage_root, "mrz.sqlite3")))
+        self.cors_allowed_origins = self._parse_csv_env(
+            "CORS_ALLOWED_ORIGINS",
+            ["*"],
+        )
+        self.cors_allowed_methods = self._parse_csv_env(
+            "CORS_ALLOWED_METHODS",
+            ["*"],
+        )
+        self.cors_allowed_headers = self._parse_csv_env(
+            "CORS_ALLOWED_HEADERS",
+            ["*"],
+        )
+        self.cors_allow_credentials = self._parse_bool_env(
+            "CORS_ALLOW_CREDENTIALS",
+            False,
+        )
+
+    @staticmethod
+    def _parse_csv_env(name: str, default: list[str]) -> list[str]:
+        raw = os.getenv(name, "")
+        values = [item.strip() for item in raw.split(",") if item.strip()]
+        return values or default[:]
+
+    @staticmethod
+    def _parse_bool_env(name: str, default: bool) -> bool:
+        raw = os.getenv(name, "").strip()
+        if not raw:
+            return default
+        return raw.lower() in {"1", "true", "yes", "on"}
 
     @property
     def uploads_dir(self) -> str:
