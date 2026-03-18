@@ -20,6 +20,14 @@ PADDLE_BALANCED_SPLIT_LABELS = ("projection", "half", "projection_m4", "projecti
 SPLIT_LINE_BOUNDARY_PAD_RATIO = 0.08
 SPLIT_LINE_BOUNDARY_PAD_MIN = 4
 SPLIT_LINE_BOUNDARY_PAD_MAX = 10
+LINE_FLATTEN_MIN_FOREGROUND_RATIO = 0.02
+LINE1_FLATTEN_MIN_CURVATURE_SPAN = 12
+LINE1_FLATTEN_CURVATURE_RATIO = 0.20
+LINE1_FLATTEN_MIN_WIDTH = 700
+LINE2_FLATTEN_MIN_CURVATURE_SPAN = 12
+LINE2_FLATTEN_CURVATURE_RATIO = 0.20
+LINE2_FLATTEN_MIN_WIDTH = 800
+LINE_FLATTEN_SMOOTHING_FRACTION = 0.05
 
 
 def clean_mrz_image(mrz_img):
@@ -67,6 +75,104 @@ def _pad_split_lines(
         value=255,
     )
     return line1, line2
+
+
+def _smooth_curve(values: np.ndarray, window: int) -> np.ndarray:
+    if window <= 1 or values.size < 3:
+        return values.astype(np.float32, copy=True)
+
+    if window % 2 == 0:
+        window += 1
+
+    pad = window // 2
+    padded = np.pad(values.astype(np.float32), (pad, pad), mode="edge")
+    kernel = np.ones(window, dtype=np.float32) / float(window)
+    return np.convolve(padded, kernel, mode="valid")
+
+
+def _curved_line_flatten_mode() -> str:
+    return os.getenv("MRZ_CURVED_LINE_FLATTEN_MODE", "off").strip().lower()
+
+
+def _flatten_line_curvature(line: np.ndarray, *, line_kind: str) -> np.ndarray:
+    gray = _to_gray(line)
+    h, w = gray.shape[:2]
+
+    if h < 24 or w < 64:
+        return line
+
+    mode = _curved_line_flatten_mode()
+    if mode not in {"line1", "both"}:
+        return line
+
+    if line_kind == "line1":
+        min_width = LINE1_FLATTEN_MIN_WIDTH
+        min_span = LINE1_FLATTEN_MIN_CURVATURE_SPAN
+        span_ratio = LINE1_FLATTEN_CURVATURE_RATIO
+    elif line_kind == "line2" and mode == "both":
+        min_width = LINE2_FLATTEN_MIN_WIDTH
+        min_span = LINE2_FLATTEN_MIN_CURVATURE_SPAN
+        span_ratio = LINE2_FLATTEN_CURVATURE_RATIO
+    else:
+        return line
+
+    if w < min_width:
+        return line
+
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    foreground = thresh < 128
+    foreground_ratio = float(foreground.mean())
+    if foreground_ratio < LINE_FLATTEN_MIN_FOREGROUND_RATIO:
+        return line
+
+    centers = np.full(w, np.nan, dtype=np.float32)
+    heights = np.zeros(w, dtype=np.float32)
+
+    for x in range(w):
+        ys = np.flatnonzero(foreground[:, x])
+        if ys.size < 2:
+            continue
+        top = float(ys[0])
+        bottom = float(ys[-1])
+        centers[x] = (top + bottom) * 0.5
+        heights[x] = bottom - top + 1.0
+
+    valid = np.isfinite(centers)
+    if int(valid.sum()) < max(16, w // 12):
+        return line
+
+    x_coords = np.arange(w, dtype=np.float32)
+    centers[~valid] = np.interp(x_coords[~valid], x_coords[valid], centers[valid])
+
+    smooth_window = max(9, int(round(w * LINE_FLATTEN_SMOOTHING_FRACTION)))
+    smooth_centers = _smooth_curve(centers, min(smooth_window, max(9, w - (1 - w % 2))))
+
+    span = float(np.percentile(smooth_centers, 95) - np.percentile(smooth_centers, 5))
+    min_required_span = max(
+        min_span,
+        int(round(h * span_ratio)),
+    )
+    if span < float(min_required_span):
+        return line
+
+    median_height = float(np.median(heights[heights > 0])) if np.any(heights > 0) else 0.0
+    if median_height <= 0 or median_height > (h * 0.65):
+        return line
+
+    target_center = float(np.median(smooth_centers))
+    map_x = np.tile(np.arange(w, dtype=np.float32), (h, 1))
+    shifts = (target_center - smooth_centers).astype(np.float32)
+    map_y = np.arange(h, dtype=np.float32)[:, None] - shifts[None, :]
+
+    flattened = cv2.remap(
+        gray,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=255,
+    )
+    return flattened
 
 
 def _to_gray(img):
@@ -268,6 +374,8 @@ def split_mrz_lines(img, *, save_debug):
     line1 = gray[:split_y, :]
     line2 = gray[split_y:, :]
     line1, line2 = _pad_split_lines(line1, line2, h)
+    line1 = _flatten_line_curvature(line1, line_kind="line1")
+    line2 = _flatten_line_curvature(line2, line_kind="line2")
 
     vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     cv2.line(vis, (0, split_y), (gray.shape[1] - 1, split_y), (0, 255, 0), 2)
@@ -304,7 +412,11 @@ def split_mrz_lines_at(gray, split_y: int):
     split_y = max(8, min(h - 8, int(split_y)))
     line1 = gray[:split_y, :]
     line2 = gray[split_y:, :]
-    return _pad_split_lines(line1, line2, h)
+    line1, line2 = _pad_split_lines(line1, line2, h)
+    return (
+        _flatten_line_curvature(line1, line_kind="line1"),
+        _flatten_line_curvature(line2, line_kind="line2"),
+    )
 
 
 def build_split_candidates(gray, base_meta: dict, profile: dict):
