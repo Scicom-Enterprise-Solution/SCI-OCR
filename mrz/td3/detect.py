@@ -44,9 +44,9 @@ CLOSE_KERNEL_H = 21
 DILATE_ITERATIONS = 3
 
 # ROI: restrict MRZ detection to the bottom portion of the passport.
-# The MRZ always sits in the lower ~35% of the biographical data page;
-# skipping the top avoids spurious wide contours from the photo / text fields.
-ROI_TOP_FRACTION = 0.65   # top of ROI as fraction of full image height
+# The MRZ sits at the bottom of the bio page, so keep the search focused on
+# the lowest quarter to reduce interference from portrait/text regions above.
+ROI_TOP_FRACTION = 0.75   # top of ROI as fraction of full image height
 
 # MRZ candidate filter constraints
 MIN_ASPECT_RATIO       = 5.0    # width / height — MRZ lines are very elongated

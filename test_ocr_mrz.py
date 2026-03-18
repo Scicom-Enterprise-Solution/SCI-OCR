@@ -350,9 +350,9 @@ class TestStage2DetectionScaling(unittest.TestCase):
 
         roi, roi_top, upscale = prepare_detection_roi(gray)
 
-        self.assertEqual(roi_top, int(350 * 0.65))
+        self.assertEqual(roi_top, int(350 * 0.75))
         self.assertGreater(upscale, 1.0)
-        self.assertAlmostEqual(upscale, 216 / (350 - int(350 * 0.65)), places=2)
+        self.assertAlmostEqual(upscale, 216 / (350 - int(350 * 0.75)), places=2)
         self.assertEqual(roi.shape[1], int(round(512 * upscale)))
 
     def test_prepare_detection_roi_does_not_upscale_medium_image_with_tall_roi(self) -> None:
@@ -360,7 +360,7 @@ class TestStage2DetectionScaling(unittest.TestCase):
 
         roi, roi_top, upscale = prepare_detection_roi(gray)
 
-        self.assertEqual(roi_top, int(921 * 0.65))
+        self.assertEqual(roi_top, int(921 * 0.75))
         self.assertEqual(upscale, 1.0)
         self.assertEqual(roi.shape[1], 687)
 
