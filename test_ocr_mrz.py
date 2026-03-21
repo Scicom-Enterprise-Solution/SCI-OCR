@@ -476,6 +476,19 @@ class TestPostSelectionConfidence(unittest.TestCase):
         self.assertFalse(confidence["available"])
         self.assertIn("ocr_confidence_unavailable", confidence["warnings"])
 
+    def test_extract_ocr_confidence_uses_real_paddle_line_confidence(self) -> None:
+        confidence = extract_ocr_confidence({
+            "backend": "paddle",
+            "text": "ABC",
+            "line_confidence": 0.8732,
+            "ocr_confidence_source": "line",
+        })
+
+        self.assertTrue(confidence["available"])
+        self.assertEqual(confidence["source"], "line")
+        self.assertEqual(confidence["score"], 0.8732)
+        self.assertEqual(confidence["warnings"], [])
+
     def test_clean_duplicate_same_text_support_does_not_trigger_small_margin_warning(self) -> None:
         line1 = "P<BGDALAM<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<"
         line2 = "A098919372BGD0601038M36020815119012168<<<<26"
@@ -649,6 +662,40 @@ class TestPairSelection(unittest.TestCase):
 
         self.assertGreater(_pair_selection_key(better_pair), _pair_selection_key(worse_pair))
 
+    def test_pair_selection_uses_line2_ocr_confidence_as_tiebreak(self) -> None:
+        lower_conf_pair = {
+            "pair_score": 294.0,
+            "pair_bonus": 10.0,
+            "line1": {
+                "score": 114.0,
+                "candidate_rank": 0,
+                "text": "P<BGDALAM<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<",
+            },
+            "line2": {
+                "score": 150.0,
+                "candidate_rank": 0,
+                "text": "A098919372BGD0601038M36020815119012168<<<<26",
+                "line_confidence": 0.82,
+            },
+        }
+        higher_conf_pair = {
+            "pair_score": 294.0,
+            "pair_bonus": 10.0,
+            "line1": {
+                "score": 114.0,
+                "candidate_rank": 0,
+                "text": "P<BGDALAM<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<",
+            },
+            "line2": {
+                "score": 150.0,
+                "candidate_rank": 0,
+                "text": "A098919372BGD0601038M36020815119012168<<<<26",
+                "line_confidence": 0.97,
+            },
+        }
+
+        self.assertGreater(_pair_selection_key(higher_conf_pair), _pair_selection_key(lower_conf_pair))
+
     def test_paddle_spill_penalty_demotes_spill_trimmed_line1_candidates(self) -> None:
         paddle_candidate = {
             "backend": "paddle",
@@ -799,8 +846,8 @@ class TestPaddleOcrAdapter(unittest.TestCase):
                 seen["count"] = len(imgs)
                 seen["shapes"] = [img.shape for img in imgs]
                 return [
-                    {"rec_texts": ["P<PAKWAQAR<<SADIA"]},
-                    {"rec_texts": ["P<BGDAHAMED<<INAM"]},
+                    {"rec_texts": ["P<PAKWAQAR<<SADIA"], "rec_scores": [0.93]},
+                    {"rec_texts": ["P<BGDAHAMED<<INAM"], "rec_scores": [0.81]},
                 ]
 
         with mock.patch("ocr_backends.paddle_backend.get_paddle_ocr", return_value=FakePaddleOCR()):
@@ -824,8 +871,16 @@ class TestPaddleOcrAdapter(unittest.TestCase):
         self.assertEqual(
             texts,
             [
-                normalize_td3_line1("P<PAKWAQAR<<SADIA"),
-                normalize_td3_line1("P<BGDAHAMED<<INAM"),
+                {
+                    "text": normalize_td3_line1("P<PAKWAQAR<<SADIA"),
+                    "line_confidence": 0.93,
+                    "ocr_confidence_source": "line",
+                },
+                {
+                    "text": normalize_td3_line1("P<BGDAHAMED<<INAM"),
+                    "line_confidence": 0.81,
+                    "ocr_confidence_source": "line",
+                },
             ],
         )
         stats = get_paddle_ocr_stats()

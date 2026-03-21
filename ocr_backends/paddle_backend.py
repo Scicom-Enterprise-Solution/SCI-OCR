@@ -3,6 +3,7 @@ import inspect
 import io
 import os
 import re
+from itertools import zip_longest
 
 import cv2
 import numpy as np
@@ -146,30 +147,60 @@ def get_paddle_ocr(lang: str, use_gpu_requested: bool):
     return _PADDLE_OCR_INSTANCE
 
 
-def extract_paddle_lines(result, normalize_mrz) -> list[str]:
-    texts = []
+def _normalize_paddle_confidence(value):
+    if value is None:
+        return None
+
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if not np.isfinite(confidence):
+        return None
+
+    return max(0.0, min(confidence, 1.0))
+
+
+def extract_paddle_entries(result, normalize_mrz) -> list[dict]:
+    entries = []
+
+    def add_entry(text: str, score=None) -> None:
+        normalized = normalize_mrz(text)
+        if not normalized:
+            return
+
+        entry = {"text": normalized}
+        confidence = _normalize_paddle_confidence(score)
+        if confidence is not None:
+            entry["line_confidence"] = confidence
+        entries.append(entry)
 
     def walk(node):
         if node is None:
             return
 
         if isinstance(node, str):
-            text = normalize_mrz(node)
-            if text:
-                texts.append(text)
+            add_entry(node)
             return
 
         if isinstance(node, dict):
-            for key in ("rec_texts", "texts"):
-                values = node.get(key)
+            for text_key, score_key in (("rec_texts", "rec_scores"), ("texts", "scores")):
+                values = node.get(text_key)
                 if isinstance(values, list):
-                    for value in values:
-                        walk(value)
+                    scores = node.get(score_key)
+                    if not isinstance(scores, list):
+                        scores = []
+                    for value, score in zip_longest(values, scores, fillvalue=None):
+                        if isinstance(value, str):
+                            add_entry(value, score)
+                        else:
+                            walk(value)
                     return
 
             text = node.get("rec_text") or node.get("text")
             if isinstance(text, str):
-                walk(text)
+                add_entry(text, node.get("rec_score") or node.get("score"))
                 return
 
             for value in node.values():
@@ -179,13 +210,18 @@ def extract_paddle_lines(result, normalize_mrz) -> list[str]:
         if isinstance(node, (list, tuple)):
             if len(node) == 2 and isinstance(node[1], (list, tuple)):
                 if node[1] and isinstance(node[1][0], str):
-                    walk(node[1][0])
+                    score = node[1][1] if len(node[1]) > 1 else None
+                    add_entry(node[1][0], score)
                     return
             for value in node:
                 walk(value)
 
     walk(result)
-    return texts
+    return entries
+
+
+def extract_paddle_lines(result, normalize_mrz) -> list[str]:
+    return [entry["text"] for entry in extract_paddle_entries(result, normalize_mrz)]
 
 
 def _prepare_paddle_image(img):
@@ -287,6 +323,94 @@ def best_paddle_text_candidate(
     return max(scored, key=lambda item: item[0])[1]
 
 
+def best_paddle_entry_candidate(
+    entries: list[dict],
+    line_kind: str,
+    *,
+    normalize_mrz,
+    normalize_td3_line2,
+    score_td3_line1,
+    score_td3_line2,
+    trim_line1_spill_func,
+) -> dict:
+    cleaned = []
+    for entry in entries:
+        text = normalize_mrz(entry.get("text", ""))
+        if not text:
+            continue
+        cleaned.append({
+            "text": text,
+            "line_confidence": _normalize_paddle_confidence(entry.get("line_confidence")),
+        })
+
+    if not cleaned:
+        return {"text": ""}
+
+    candidates = []
+    seen = {}
+
+    def add_candidate(text: str, source_confidence) -> None:
+        if not text:
+            return
+
+        existing = seen.get(text)
+        if existing is None:
+            candidate = {"text": text, "line_confidence": source_confidence}
+            seen[text] = candidate
+            candidates.append(candidate)
+            return
+
+        if source_confidence is not None:
+            previous = existing.get("line_confidence")
+            if previous is None or source_confidence > previous:
+                existing["line_confidence"] = source_confidence
+
+    for entry in cleaned:
+        text = entry["text"]
+        confidence = entry.get("line_confidence")
+        add_candidate(text, confidence)
+        for fragment in re.findall(r"[A-Z0-9<]{6,}", text):
+            add_candidate(fragment, confidence)
+
+    joined_confidence = max(
+        (
+            entry.get("line_confidence")
+            for entry in cleaned
+            if entry.get("line_confidence") is not None
+        ),
+        default=None,
+    )
+    add_candidate(normalize_mrz("".join(entry["text"] for entry in cleaned)), joined_confidence)
+
+    if line_kind == "line1":
+        scored = []
+        for cand in candidates:
+            trimmed = trim_line1_spill_func(cand["text"])
+            score = score_td3_line1(trimmed)
+            if any(ch.isdigit() for ch in trimmed[5:]):
+                score -= 80.0
+            if re.search(r"<{4,}[A-Z0-9]{1,6}$", cand["text"]):
+                score -= 40.0
+            scored.append((score, trimmed, cand.get("line_confidence")))
+        _, text, confidence = max(scored, key=lambda item: item[0])
+    else:
+        scored = []
+        for cand in candidates:
+            normalized = normalize_td3_line2(cand["text"])
+            score, checks = score_td3_line2(normalized)
+            if not re.match(r"^[A-Z0-9<]{1,2}[A-Z0-9<]{7,}", normalized):
+                score -= 20.0
+            score += checks.get("passed_count", 0) * 5.0
+            scored.append((score, normalized, cand.get("line_confidence")))
+        _, text, confidence = max(scored, key=lambda item: item[0])
+
+    payload = {"text": text}
+    if confidence is not None:
+        payload["line_confidence"] = confidence
+        payload["ocr_confidence_source"] = "line"
+    return payload
+
+
 def paddle_ocr_image(
     img,
     *,
@@ -311,22 +435,15 @@ def paddle_ocr_image(
             "reinstall the pinned versions from requirements-paddle.txt in .venv."
         ) from exc
 
-    texts = extract_paddle_lines(result, normalize_mrz)
-    if not texts:
-        return ""
-
-    if line_kind in {"line1", "line2"}:
-        return best_paddle_text_candidate(
-            texts,
-            line_kind,
-            normalize_mrz=normalize_mrz,
-            normalize_td3_line2=normalize_td3_line2,
-            score_td3_line1=score_td3_line1,
-            score_td3_line2=score_td3_line2,
-            trim_line1_spill_func=lambda text: trim_line1_spill(text, normalize_td3_line1),
-        )
-
-    return normalize_mrz("".join(texts))
+    return _extract_candidate_from_paddle_result(
+        result,
+        line_kind=line_kind,
+        normalize_mrz=normalize_mrz,
+        normalize_td3_line1=normalize_td3_line1,
+        normalize_td3_line2=normalize_td3_line2,
+        score_td3_line1=score_td3_line1,
+        score_td3_line2=score_td3_line2,
+    )["text"]
 
 
 def paddle_ocr_images(
@@ -366,7 +483,7 @@ def paddle_ocr_images(
                     "reinstall the pinned versions from requirements-paddle.txt in .venv."
                 ) from exc
             texts.append(
-                _extract_text_from_paddle_result(
+                _extract_candidate_from_paddle_result(
                     result,
                     line_kind=line_kind,
                     normalize_mrz=normalize_mrz,
@@ -380,7 +497,7 @@ def paddle_ocr_images(
 
     _PADDLE_OCR_STATS["batched_calls"] += 1
     return [
-        _extract_text_from_paddle_result(
+        _extract_candidate_from_paddle_result(
             result,
             line_kind=line_kind,
             normalize_mrz=normalize_mrz,
@@ -393,7 +510,7 @@ def paddle_ocr_images(
     ]
 
 
-def _extract_text_from_paddle_result(
+def _extract_candidate_from_paddle_result(
     result,
     *,
     line_kind: str | None,
@@ -402,14 +519,14 @@ def _extract_text_from_paddle_result(
     normalize_td3_line2,
     score_td3_line1,
     score_td3_line2,
-) -> str:
-    texts = extract_paddle_lines(result, normalize_mrz)
-    if not texts:
-        return ""
+) -> dict:
+    entries = extract_paddle_entries(result, normalize_mrz)
+    if not entries:
+        return {"text": ""}
 
     if line_kind in {"line1", "line2"}:
-        return best_paddle_text_candidate(
-            texts,
+        return best_paddle_entry_candidate(
+            entries,
             line_kind,
             normalize_mrz=normalize_mrz,
             normalize_td3_line2=normalize_td3_line2,
@@ -418,4 +535,16 @@ def _extract_text_from_paddle_result(
             trim_line1_spill_func=lambda text: trim_line1_spill(text, normalize_td3_line1),
         )
 
-    return normalize_mrz("".join(texts))
+    payload = {"text": normalize_mrz("".join(entry["text"] for entry in entries))}
+    confidence = max(
+        (
+            entry.get("line_confidence")
+            for entry in entries
+            if entry.get("line_confidence") is not None
+        ),
+        default=None,
+    )
+    if confidence is not None:
+        payload["line_confidence"] = confidence
+        payload["ocr_confidence_source"] = "line"
+    return payload

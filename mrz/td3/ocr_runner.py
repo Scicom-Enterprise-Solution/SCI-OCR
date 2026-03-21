@@ -234,7 +234,16 @@ def generate_ocr_candidates(
             score_td3_line1=score_td3_line1,
             score_td3_line2=score_td3_line2,
         )
-        for v, text in zip(variants, paddle_texts):
+        for v, paddle_result in zip(variants, paddle_texts):
+            if isinstance(paddle_result, dict):
+                text = paddle_result.get("text", "")
+                line_confidence = paddle_result.get("line_confidence")
+                confidence_source = paddle_result.get("ocr_confidence_source")
+            else:
+                text = paddle_result
+                line_confidence = None
+                confidence_source = None
+
             if not text:
                 continue
             norm = normalize_mrz(text)
@@ -242,7 +251,7 @@ def generate_ocr_candidates(
             if key in seen:
                 continue
             seen.add(key)
-            candidates.append({
+            candidate = {
                 "backend": "paddle",
                 "text_raw": text,
                 "text": norm,
@@ -250,7 +259,12 @@ def generate_ocr_candidates(
                 "variant_meta": v["meta"],
                 "psm": PADDLE_OCR_BACKEND_LABEL,
                 "image": v["image"],
-            })
+            }
+            if line_confidence is not None:
+                candidate["line_confidence"] = line_confidence
+            if confidence_source:
+                candidate["ocr_confidence_source"] = confidence_source
+            candidates.append(candidate)
 
     return candidates
 

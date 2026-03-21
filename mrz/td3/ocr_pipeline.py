@@ -343,10 +343,18 @@ def _run_auto_paddle_batches(prepared_splits: list[dict]) -> list[dict]:
             score_td3_line1=score_td3_line1,
             score_td3_line2=score_td3_line2,
         )
-        for (split_index, variant), text in zip(line1_jobs, line1_texts):
+        for (split_index, variant), paddle_result in zip(line1_jobs, line1_texts):
+            if isinstance(paddle_result, dict):
+                text = paddle_result.get("text", "")
+                line_confidence = paddle_result.get("line_confidence")
+                confidence_source = paddle_result.get("ocr_confidence_source")
+            else:
+                text = paddle_result
+                line_confidence = None
+                confidence_source = None
             if not text:
                 continue
-            split_results[split_index]["line1"].append({
+            candidate = {
                 "backend": "paddle",
                 "text_raw": text,
                 "text": normalize_mrz(text),
@@ -354,7 +362,12 @@ def _run_auto_paddle_batches(prepared_splits: list[dict]) -> list[dict]:
                 "variant_meta": variant["meta"],
                 "psm": PADDLE_OCR_BACKEND_LABEL,
                 "image": variant["image"],
-            })
+            }
+            if line_confidence is not None:
+                candidate["line_confidence"] = line_confidence
+            if confidence_source:
+                candidate["ocr_confidence_source"] = confidence_source
+            split_results[split_index]["line1"].append(candidate)
 
     if line2_images:
         line2_texts = _paddle_ocr_images_impl(
@@ -368,10 +381,18 @@ def _run_auto_paddle_batches(prepared_splits: list[dict]) -> list[dict]:
             score_td3_line1=score_td3_line1,
             score_td3_line2=score_td3_line2,
         )
-        for (split_index, variant), text in zip(line2_jobs, line2_texts):
+        for (split_index, variant), paddle_result in zip(line2_jobs, line2_texts):
+            if isinstance(paddle_result, dict):
+                text = paddle_result.get("text", "")
+                line_confidence = paddle_result.get("line_confidence")
+                confidence_source = paddle_result.get("ocr_confidence_source")
+            else:
+                text = paddle_result
+                line_confidence = None
+                confidence_source = None
             if not text:
                 continue
-            split_results[split_index]["line2"].append({
+            candidate = {
                 "backend": "paddle",
                 "text_raw": text,
                 "text": normalize_mrz(text),
@@ -379,7 +400,12 @@ def _run_auto_paddle_batches(prepared_splits: list[dict]) -> list[dict]:
                 "variant_meta": variant["meta"],
                 "psm": PADDLE_OCR_BACKEND_LABEL,
                 "image": variant["image"],
-            })
+            }
+            if line_confidence is not None:
+                candidate["line_confidence"] = line_confidence
+            if confidence_source:
+                candidate["ocr_confidence_source"] = confidence_source
+            split_results[split_index]["line2"].append(candidate)
 
     return split_results
 
@@ -560,15 +586,32 @@ def _rank_candidates(candidates, score_key: str):
     return ordered
 
 
+def _candidate_ocr_confidence_key(candidate: dict) -> float:
+    score = candidate.get("ocr_confidence_score")
+    if score is None:
+        score = candidate.get("line_confidence")
+    if score is None:
+        return -1.0
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return -1.0
+    if not math.isfinite(value):
+        return -1.0
+    return max(0.0, min(value, 1.0))
+
+
 def _pair_selection_key(candidate_pair: dict) -> tuple:
     line1_rank = candidate_pair["line1"].get("candidate_rank", 10**9)
     line2_rank = candidate_pair["line2"].get("candidate_rank", 10**9)
+    line2_ocr_confidence = _candidate_ocr_confidence_key(candidate_pair["line2"])
 
     return (
         candidate_pair["pair_score"],
         candidate_pair.get("pair_bonus", 0.0),
         candidate_pair["line1"]["score"],
         candidate_pair["line2"]["score"],
+        line2_ocr_confidence,
         -line1_rank,
         -line2_rank,
         candidate_pair["line1"]["text"],
@@ -608,6 +651,7 @@ def _serialize_line2_candidate(c: dict) -> dict:
         "split_y": c.get("split_y"),
         "variant_meta": c.get("variant_meta"),
         "backend": c.get("backend"),
+        "line_confidence": round(c["line_confidence"], 4) if c.get("line_confidence") is not None else None,
         "checks": c.get("checks"),
     }
 
