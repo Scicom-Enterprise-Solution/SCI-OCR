@@ -581,9 +581,47 @@ def _pick_top(candidates, score_key: str, topn: int = 5):
 
 def _rank_candidates(candidates, score_key: str):
     ordered = sorted(candidates, key=lambda x: x[score_key], reverse=True)
+    index_groups = {}
+    for idx, cand in enumerate(ordered):
+        index_groups.setdefault((cand[score_key], cand.get("text")), []).append(idx)
+
+    for indices in index_groups.values():
+        if len(indices) <= 1:
+            continue
+        reordered = sorted(
+            (ordered[idx] for idx in indices),
+            key=_candidate_cleanliness_key,
+        )
+        for idx, cand in zip(indices, reordered):
+            ordered[idx] = cand
+
     for rank, cand in enumerate(ordered):
         cand["candidate_rank"] = rank
     return ordered
+
+
+def _candidate_repair_risk_score(candidate: dict) -> int:
+    risk_weights = {
+        "name_noise_collapse": 4,
+        "token_ambiguity_repair": 3,
+        "surname_ambiguity_repair": 3,
+        "paddle_surname_ambiguity_repair": 3,
+        "country_code_ambiguity_repair": 1,
+        "document_code": 1,
+    }
+    total = 0
+    for repair in candidate.get("repairs", []):
+        total += risk_weights.get(repair.get("reason"), 2)
+    return total
+
+
+def _candidate_cleanliness_key(candidate: dict) -> tuple:
+    repairs = list(candidate.get("repairs", []))
+    return (
+        0 if not repairs else 1,
+        len(repairs),
+        _candidate_repair_risk_score(candidate),
+    )
 
 
 def _candidate_ocr_confidence_key(candidate: dict) -> float:

@@ -234,6 +234,30 @@ This covers:
 
 The script now uses the project Python for JSON parsing and does not require `jq`.
 
+## Confidence Layer
+
+The TD3 OCR pipeline now includes a post-selection confidence layer.
+
+Important behavior:
+
+- candidate ranking and winner selection still use the existing structural TD3 scoring
+- confidence is computed after winner selection
+- Paddle OCR confidence is now preserved when the backend returns real `rec_scores`
+- OCR confidence is used conservatively:
+  - surfaced in report/API confidence output
+  - used as a narrow line2 tie-break only when the existing structural score is already tied
+  - not used as a global primary ranking signal
+
+Selection cleanup:
+
+- when multiple candidates collapse to the same final text with the same score, the pipeline now prefers the cleanest instance
+- preference order is:
+  - no repairs
+  - then fewer repairs
+  - then lower repair-risk repairs
+
+This keeps extracted text stable while improving trust reporting and avoiding unnecessary repair warnings when an equivalent non-repair candidate already exists.
+
 ## OpenAI-Compatible LLM Hook
 
 The API now includes a small provider-agnostic LLM layer for OpenAI-compatible backends such as:

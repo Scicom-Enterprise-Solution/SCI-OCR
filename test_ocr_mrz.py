@@ -10,6 +10,7 @@ from mrz.td3.ocr_pipeline import (
     _auto_requires_tesseract,
     _apply_candidate_support_bonus,
     _best_paddle_text_candidate,
+    _rank_candidates,
     _line1_selection_penalty,
     _paddle_ocr_image,
     _pair_selection_key,
@@ -630,6 +631,33 @@ class TestStage2DetectionScaling(unittest.TestCase):
 
 
 class TestPairSelection(unittest.TestCase):
+    def test_rank_candidates_prefers_cleaner_same_text_instance(self) -> None:
+        candidates = [
+            {
+                "text": "P<BGDAHMAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<",
+                "score": 161.9,
+                "repairs": [
+                    {"reason": "country_code_ambiguity_repair"},
+                    {"reason": "paddle_surname_ambiguity_repair"},
+                ],
+            },
+            {
+                "text": "P<BGDAHMAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<",
+                "score": 161.9,
+                "repairs": [],
+            },
+            {
+                "text": "P<BGDAHMAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<",
+                "score": 161.9,
+                "repairs": [{"reason": "token_ambiguity_repair"}],
+            },
+        ]
+
+        ranked = _rank_candidates(candidates, "score")
+
+        self.assertEqual(ranked[0]["repairs"], [])
+        self.assertEqual(ranked[1]["repairs"], [{"reason": "token_ambiguity_repair"}])
+
     def test_pair_selection_prefers_lower_candidate_rank_over_lexicographic_text(self) -> None:
         better_pair = {
             "pair_score": 294.0,
