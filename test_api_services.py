@@ -268,7 +268,15 @@ class TestExtractionModes(unittest.TestCase):
             "api.services.extraction_service.run_backend_correction",
         ) as run_backend_correction, mock.patch(
             "api.services.extraction_service.process_document",
-            return_value={"status": "success", "mrz": {"text": {}, "parsed": {}}, "duration_ms": 1.0},
+            return_value={
+                "status": "success",
+                "mrz": {
+                    "text": {},
+                    "parsed": {},
+                    "ocr": {"confidence": {"final_score": 0.91, "warnings": []}},
+                },
+                "duration_ms": 1.0,
+            },
         ) as process_document, mock.patch(
             "api.services.extraction_service.insert_extraction",
             side_effect=lambda db_path, record: record,
@@ -302,6 +310,7 @@ class TestExtractionModes(unittest.TestCase):
         self.assertEqual(record["rotation"], 0)
         self.assertIsNone(record["transform"])
         self.assertIsNone(record["crop"])
+        self.assertEqual(record["confidence"], {"final_score": 0.91, "warnings": []})
 
 
 class TestLLMService(unittest.TestCase):

@@ -40,6 +40,7 @@ def print_sample_result(
     expected2: str = "",
     reason: str = "",
     error: str = "",
+    confidence: dict | None = None,
 ) -> None:
     suffix = f" ({elapsed_s:.2f}s)" if elapsed_s is not None else ""
     print(f"RESULT {filename} {color_status('PASS' if ok else 'FAIL', ok)}{suffix}")
@@ -47,6 +48,17 @@ def print_sample_result(
         print("Extracted MRZ text:")
         print(actual1)
         print(actual2)
+    if confidence:
+        final_score = confidence.get("final_score")
+        suspicious = confidence.get("suspicious")
+        warnings = confidence.get("warnings") or []
+        score_text = f"{final_score:.4f}" if isinstance(final_score, (int, float)) else "n/a"
+        print(
+            f"[Confidence] score={score_text} "
+            f"suspicious={bool(suspicious)}"
+        )
+        if warnings:
+            print(f"[Confidence] warnings={', '.join(str(item) for item in warnings)}")
     if ok:
         print(
             f"[Reference] {color_status('PASS', True)} "
@@ -113,6 +125,7 @@ def run_reference_set(backend: str) -> int:
             "elapsed_s": round(elapsed_s, 2),
             "line1": actual1,
             "line2": actual2,
+            "confidence": ((report.get("mrz", {}).get("ocr", {}) or {}).get("confidence")),
             "report": report,
         }
         if status != "PASS":
@@ -162,6 +175,7 @@ def run_reference_set(backend: str) -> int:
             text = report.get("mrz", {}).get("text", {})
             actual1 = text.get("line1", "")
             actual2 = text.get("line2", "")
+            confidence = ((report.get("mrz", {}).get("ocr", {}) or {}).get("confidence"))
             expected1 = expected.get("line1", "")
             expected2 = expected.get("line2", "")
 
@@ -179,6 +193,7 @@ def run_reference_set(backend: str) -> int:
                     elapsed_s=elapsed_s,
                     actual1=actual1,
                     actual2=actual2,
+                    confidence=confidence,
                 )
                 passes.append(filename)
                 sample_timings.append((filename, elapsed_s, True))
@@ -204,6 +219,7 @@ def run_reference_set(backend: str) -> int:
                     expected2=expected2,
                     reason="mismatch" if report.get("status") == "success" else "run_failed",
                     error=error or report.get("error", ""),
+                    confidence=confidence,
                 )
                 sample_timings.append((filename, elapsed_s, False))
                 fail_item = {

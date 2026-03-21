@@ -66,6 +66,7 @@ class ExtractionResponse(BaseModel):
     line1: str
     line2: str
     parsed: dict[str, Any]
+    confidence: dict[str, Any] | None = None
     duration_ms: float | None = None
     report_path: str | None = None
     document_id: str

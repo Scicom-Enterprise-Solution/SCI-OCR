@@ -15,6 +15,7 @@ from mrz.td3.country_codes import is_valid_mrz_country_code
 from mrz.td3.checksums import (
     AMBIGUOUS_FIELD_SUBS,
     DOC_NUMBER_AMBIGUOUS_SUBS,
+    build_checksum_confidence,
     char_value,
     checksum,
     correct_field,
@@ -39,6 +40,7 @@ from mrz.td3.ocr_runner import (
     PADDLE_OCR_BACKEND_LABEL,
     apply_candidate_support_bonus as _apply_candidate_support_bonus,
     best_paddle_text_candidate as _best_paddle_text_candidate_impl,
+    extract_ocr_confidence as _extract_ocr_confidence,
     get_paddle_ocr_stats as _get_paddle_ocr_stats_impl,
     generate_ocr_candidates as generate_ocr_candidates_impl,
     get_paddle_ocr as _get_paddle_ocr_impl,
@@ -60,6 +62,7 @@ from mrz.td3.repair import (
     _candidate_given_zone_repairs,
     _generate_token_variants,
     _split_given_name_zone,
+    build_repair_confidence,
     repair_given_name_token,
     repair_given_name_zone,
     repair_issuing_country_code,
@@ -71,6 +74,9 @@ from mrz.td3.score import (
     _max_consonant_run,
     _max_vowel_run,
     _name_token_score,
+    assemble_td3_confidence,
+    build_candidate_margin_confidence,
+    build_structure_confidence,
     pair_consistency_bonus,
     score_split_quality,
     score_td3_line1,
@@ -850,22 +856,35 @@ def run_ocr(mrz_img):
     if not all_line1_candidates or not all_line2_candidates:
         raise RuntimeError("No valid split candidates produced OCR results")
 
+    # ============================
+    # RANKING
+    # ============================
+
     ranking_started_at = time.perf_counter()
+
     _apply_candidate_support_bonus(all_line1_candidates)
 
     line1_ranked = _rank_candidates(all_line1_candidates, "score")
     line2_ranked = _rank_candidates(all_line2_candidates, "score")
+
     line1_top = line1_ranked[:5]
     line2_top = line2_ranked[:5]
 
-    best_pair = None
+    # ============================
+    # VALIDATION-GATED PAIR SELECTION
+    # ============================
+
+    valid_pairs = []
+    fallback_pairs = []
     pair_count = 0
 
     for c1 in line1_ranked:
         for c2 in line2_ranked:
             pair_count += 1
+
             checks = c2.get("checks") or validate_td3_checks(c2["text"])
             pair_bonus = pair_consistency_bonus(c1["text"], c2["text"])
+
             pair_score = (
                 c1["score"]
                 + c2["score"]
@@ -882,21 +901,41 @@ def run_ocr(mrz_img):
                 "repairs_applied": list(c1.get("repairs", [])),
             }
 
-            candidate_key = _pair_selection_key(candidate_pair)
-            best_key = None
-            if best_pair is not None:
-                best_key = _pair_selection_key(best_pair)
+            if checks.get("passed_count") == 5 and checks.get("composite_valid"):
+                valid_pairs.append(candidate_pair)
+            else:
+                fallback_pairs.append(candidate_pair)
 
-            if best_pair is None or candidate_key > best_key:
-                best_pair = candidate_pair
+    def _select_best(pairs):
+        best = None
+        for p in pairs:
+            if best is None or _pair_selection_key(p) > _pair_selection_key(best):
+                best = p
+        return best
+
+    # ============================
+    # SELECTION STRATEGY
+    # ============================
+
+    if valid_pairs:
+        best_pair = _select_best(valid_pairs)
+        best_pair["selection_mode"] = "strict_valid"
+    else:
+        best_pair = _select_best(fallback_pairs)
+        best_pair["selection_mode"] = "fallback"
+        best_pair["force_suspicious"] = True
+
 
     if best_pair is None:
         raise RuntimeError("No valid line pair selected from OCR candidates")
 
-    ranking_and_pairing_ms = round((time.perf_counter() - ranking_started_at) * 1000.0, 2)
+    ranking_and_pairing_ms = round(
+        (time.perf_counter() - ranking_started_at) * 1000.0, 2
+    )
 
     selected_line1_split = best_pair["line1"]["split_label"]
     selected_line2_split = best_pair["line2"]["split_label"]
+
     selected_line1_y = best_pair["line1"]["split_y"]
     selected_line2_y = best_pair["line2"]["split_y"]
 
@@ -915,6 +954,31 @@ def run_ocr(mrz_img):
     best_line1 = best_pair["line1"]["text"]
     best_line2 = best_pair["line2"]["text"]
     checks = best_pair["checks"]
+
+    checksum_confidence = build_checksum_confidence(checks)
+    structure_confidence = build_structure_confidence(best_line1, best_line2)
+    repair_confidence = build_repair_confidence(best_pair["repairs_applied"])
+    margin_confidence = build_candidate_margin_confidence(
+        best_pair, line1_ranked, line2_ranked
+    )
+
+    ocr_confidence = (
+        _extract_ocr_confidence(best_pair["line2"])
+        or _extract_ocr_confidence(best_pair["line1"])
+    )
+
+    confidence = assemble_td3_confidence(
+        checksum_confidence=checksum_confidence,
+        structure_confidence=structure_confidence,
+        repair_confidence=repair_confidence,
+        margin_confidence=margin_confidence,
+        ocr_confidence=ocr_confidence,
+        selected_meta={
+            "line1_score": best_pair["line1"]["score"],
+            "line2_score": best_pair["line2"]["score"],
+            "pair_score": best_pair["pair_score"],
+        },
+    )
 
     save(selected_line1_img, "mrz_line1.png")
     save(selected_line2_img, "mrz_line2.png")
@@ -983,6 +1047,7 @@ def run_ocr(mrz_img):
             "pair_bonus": round(best_pair.get("pair_bonus", 0.0), 2),
         },
         "checksum_summary": checks,
+        "confidence": confidence,
         "repairs_applied": best_pair["repairs_applied"],
         "parsed_fields": parsed,
         "backend_stats": {

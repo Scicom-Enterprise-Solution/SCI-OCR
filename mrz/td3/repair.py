@@ -19,9 +19,147 @@ TOKEN_AMBIGUOUS_SUBS = {
     "M": ("N",),
     "N": ("M",),
 }
+VOWELS = set("AEIOUY")
 
 MIN_TOKEN_REPAIR_SCORE_GAIN = 6.0
 MIN_LINE1_ZONE_REPAIR_GAIN = 4.0
+
+
+HIGH_RISK_REPAIR_REASONS = {
+    "name_noise_collapse",
+    "token_ambiguity_repair",
+    "surname_ambiguity_repair",
+    "paddle_surname_ambiguity_repair",
+    "trim_long_given_token_noise",
+    "trim_long_given_token_noise_with_token_repair",
+}
+
+MEDIUM_RISK_REPAIR_REASONS = {
+    "country_code_ambiguity_repair",
+    "drop_noise_before_country_code",
+    "prefer_passport_filler_document_code",
+}
+
+LINE1_NAME_REWRITE_POSITIONS = {
+    "surname",
+    "given_name_zone",
+    "given_name_token",
+    "name",
+}
+
+
+def _edit_distance(left: str, right: str) -> int:
+    if left == right:
+        return 0
+    if not left:
+        return len(right)
+    if not right:
+        return len(left)
+
+    prev = list(range(len(right) + 1))
+    for i, lch in enumerate(left, start=1):
+        cur = [i]
+        for j, rch in enumerate(right, start=1):
+            cur.append(min(
+                prev[j] + 1,
+                cur[j - 1] + 1,
+                prev[j - 1] + (0 if lch == rch else 1),
+            ))
+        prev = cur
+    return prev[-1]
+
+
+def _substitution_count(left: str, right: str) -> int:
+    if len(left) != len(right):
+        return 0
+    return sum(1 for src, dst in zip(left, right) if src != dst)
+
+
+def _repair_risk_weight(repair: dict) -> tuple[float, str]:
+    reason = (repair.get("reason") or "").strip()
+    position = (repair.get("position") or "").strip()
+    field = (repair.get("field") or "").strip()
+
+    if position in LINE1_NAME_REWRITE_POSITIONS or reason in HIGH_RISK_REPAIR_REASONS:
+        return 0.18, "high"
+    if reason in MEDIUM_RISK_REPAIR_REASONS:
+        return 0.10, "medium"
+    if field == "line2":
+        return 0.05, "low"
+    return 0.07, "low"
+
+
+def build_repair_confidence(repairs: list[dict]) -> dict:
+    if not repairs:
+        return {
+            "penalty": 0.0,
+            "score": 1.0,
+            "risk": "none",
+            "repair_count": 0,
+            "edit_estimate": 0,
+            "substitution_count": 0,
+            "name_rewrite_count": 0,
+            "checksum_backed_repair_count": 0,
+            "warnings": [],
+            "details": [],
+        }
+
+    total_penalty = 0.0
+    total_edits = 0
+    total_substitutions = 0
+    name_rewrite_count = 0
+    checksum_backed_repair_count = 0
+    details = []
+    risk_rank = "none"
+    warnings = []
+    rank_order = {"none": 0, "low": 1, "medium": 2, "high": 3}
+
+    for repair in repairs:
+        from_text = str(repair.get("from", "") or "")
+        to_text = str(repair.get("to", "") or "")
+        edit_distance = _edit_distance(from_text, to_text)
+        substitutions = _substitution_count(from_text, to_text)
+        base_penalty, risk = _repair_risk_weight(repair)
+        repair_penalty = base_penalty + (edit_distance * 0.015) + (substitutions * 0.01)
+        total_penalty += repair_penalty
+        total_edits += edit_distance
+        total_substitutions += substitutions
+        if rank_order[risk] > rank_order[risk_rank]:
+            risk_rank = risk
+
+        if repair.get("position") in LINE1_NAME_REWRITE_POSITIONS:
+            name_rewrite_count += 1
+        if repair.get("field") == "line2":
+            checksum_backed_repair_count += 1
+
+        details.append({
+            "field": repair.get("field"),
+            "position": repair.get("position"),
+            "reason": repair.get("reason"),
+            "risk": risk,
+            "edit_distance": edit_distance,
+            "substitution_count": substitutions,
+            "penalty": round(repair_penalty, 4),
+        })
+
+    if len(repairs) >= 2:
+        warnings.append("multiple_repairs_applied")
+    if name_rewrite_count > 0:
+        warnings.append("line1_name_rewritten")
+
+    total_penalty = max(0.0, min(total_penalty, 1.0))
+    return {
+        "penalty": round(total_penalty, 4),
+        "score": round(max(0.0, 1.0 - total_penalty), 4),
+        "risk": risk_rank,
+        "repair_count": len(repairs),
+        "edit_estimate": total_edits,
+        "substitution_count": total_substitutions,
+        "name_rewrite_count": name_rewrite_count,
+        "checksum_backed_repair_count": checksum_backed_repair_count,
+        "warnings": warnings,
+        "details": details,
+    }
 
 
 def _generate_token_variants(token: str, max_edits: int = 2) -> set[str]:
@@ -46,6 +184,19 @@ def _generate_token_variants(token: str, max_edits: int = 2) -> set[str]:
                     chars[j] = repl_j
                     variants.add("".join(chars))
 
+    # Allow one conservative insertion repair for short tokens where OCR likely
+    # collapsed a vertical stroke inside a repeated-vowel cluster, e.g.
+    # ADEEA -> ADEELA. This remains gated by downstream token-score gain.
+    if 4 <= len(token) <= 6 and "L" not in token and "I" not in token:
+        for i in range(1, len(token)):
+            if token[i - 1] not in VOWELS or token[i] not in VOWELS:
+                continue
+            repeated_vowel_cluster = token[i - 1] == token[i] or (
+                i >= 2 and token[i - 2] == token[i - 1]
+            )
+            if repeated_vowel_cluster:
+                variants.add(token[:i] + "L" + token[i:])
+
     return {v for v in variants if v}
 
 
@@ -54,6 +205,23 @@ def _split_given_name_zone(given_raw: str) -> tuple[str, str]:
     given_token = _sanitize_name_token(raw_first)
     given_tail = _sanitize_name_zone(sep + raw_tail) if sep else ""
     return given_token, given_tail
+
+
+def _preserved_double_letter_count(source: str, candidate: str) -> int:
+    source = _sanitize_name_token(source)
+    candidate = _sanitize_name_token(candidate)
+    if not source or not candidate:
+        return 0
+
+    source_pairs = {
+        source[i:i + 2]
+        for i in range(len(source) - 1)
+        if source[i] == source[i + 1]
+    }
+    if not source_pairs:
+        return 0
+
+    return sum(1 for pair in source_pairs if pair in candidate)
 
 
 def _normalize_given_tail(given_tail: str) -> str:
@@ -110,7 +278,14 @@ def repair_given_name_token(token: str) -> tuple[str, dict]:
         candidates = {raw}
     ranked = sorted(
         ((cand, _name_token_score(cand)) for cand in candidates),
-        key=lambda x: (x[1], -abs(len(x[0]) - 5), x[0][-1] in "AEIOUY"),
+        key=lambda x: (
+            x[1],
+            _preserved_double_letter_count(raw, x[0]),
+            -abs(len(x[0]) - 5),
+            x[0][-1] in "AEIOUY",
+            x[0].endswith("A"),
+            x[0],
+        ),
         reverse=True,
     )
 
@@ -145,7 +320,7 @@ def repair_document_code(line1: str) -> tuple[str, dict | None]:
         return line, None
 
     repaired = normalize_td3_line1("P<" + line[2:])
-    if score_td3_line1(repaired) <= score_td3_line1(line):
+    if score_td3_line1(repaired) < score_td3_line1(line):
         return line, None
 
     return repaired, {
@@ -321,6 +496,7 @@ def repair_given_name_zone(
         key=lambda item: (
             item[0],
             _name_token_score(item[1]),
+            _preserved_double_letter_count(baseline_token, item[1]),
             -len(item[2]),
             item[1].endswith("A"),
             item[1],

@@ -33,6 +33,14 @@ from mrz.td3.ocr_pipeline import (
     validate_and_correct_mrz,
     validate_td3_checks,
 )
+from mrz.td3.checksums import build_checksum_confidence
+from mrz.td3.ocr_runner import extract_ocr_confidence
+from mrz.td3.repair import build_repair_confidence
+from mrz.td3.score import (
+    assemble_td3_confidence,
+    build_candidate_margin_confidence,
+    build_structure_confidence,
+)
 from mrz.td3.detect import merge_bboxes, prepare_detection_roi, scale_bboxes_back
 from ocr_backends.paddle_backend import get_paddle_ocr_stats, paddle_ocr_images, reset_paddle_ocr_stats
 
@@ -84,6 +92,12 @@ class TestLine1Repair(unittest.TestCase):
 
     def test_repair_given_name_token_prefers_l_over_i_for_adeela(self) -> None:
         repaired, meta = repair_given_name_token("ADEEIA")
+
+        self.assertEqual(repaired, "ADEELA")
+        self.assertTrue(meta["changed"])
+
+    def test_repair_given_name_token_restores_missing_l_for_adeela(self) -> None:
+        repaired, meta = repair_given_name_token("ADEEA")
 
         self.assertEqual(repaired, "ADEELA")
         self.assertTrue(meta["changed"])
@@ -205,6 +219,12 @@ class TestLine1Repair(unittest.TestCase):
     def test_score_prefers_passport_filler_prefix_over_po_for_standard_passport_line(self) -> None:
         expected = score_td3_line1("P<GINCAMARA<<FATOUMATA<BOBO<<<<<<<<<<<<<<<<<")
         weak = score_td3_line1("POGINCAMARA<<FATOUMATA<BOBO<<<<<<<<<<<<<<<<<")
+
+        self.assertGreater(expected, weak)
+
+    def test_score_prefers_adeela_over_adeea_for_first_given_name_token(self) -> None:
+        expected = score_td3_line1("P<BGDAHMAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<")
+        weak = score_td3_line1("P<BGDAHMAD<<ADEEA<<<<<<<<<<<<<<<<<<<<<<<<<<<")
 
         self.assertGreater(expected, weak)
 
@@ -342,6 +362,194 @@ class TestLine2Checks(unittest.TestCase):
 
         self.assertEqual(repaired[13:19], "001208")
         self.assertEqual(checks["passed_count"], 5)
+
+class TestPostSelectionConfidence(unittest.TestCase):
+    def test_build_checksum_confidence_warns_on_composite_failure(self) -> None:
+        checks = validate_td3_checks("A098919372BGD0601038M36020815119012168<<<<20")
+
+        confidence = build_checksum_confidence(checks)
+
+        self.assertFalse(confidence["composite_valid"])
+        self.assertIn("composite_checksum_failed", confidence["warnings"])
+        self.assertLess(confidence["score"], 1.0)
+
+    def test_build_repair_confidence_flags_multiple_name_repairs(self) -> None:
+        repairs = [
+            {
+                "field": "line1",
+                "position": "given_name_zone",
+                "from": "SADTAKKKKK",
+                "to": "SADIA<<<<",
+                "reason": "trim_long_given_token_noise",
+            },
+            {
+                "field": "line1",
+                "position": "name",
+                "from": "WAQAR<<SADTAKKKKK",
+                "to": "WAQAR<<SADIA<<<<",
+                "reason": "name_noise_collapse",
+            },
+        ]
+
+        confidence = build_repair_confidence(repairs)
+
+        self.assertEqual(confidence["risk"], "high")
+        self.assertIn("multiple_repairs_applied", confidence["warnings"])
+        self.assertIn("line1_name_rewritten", confidence["warnings"])
+        self.assertGreater(confidence["penalty"], 0.0)
+
+    def test_candidate_margin_confidence_handles_single_candidate_without_warning(self) -> None:
+        best_pair = {
+            "line1": {"text": "L1", "variant_id": "v1", "psm": "p1", "split_label": "projection", "score": 120.0},
+            "line2": {
+                "text": "A098919372BGD0601038M36020815119012168<<<<26",
+                "variant_id": "v2",
+                "psm": "p2",
+                "split_label": "projection",
+                "score": 150.0,
+                "checks": validate_td3_checks("A098919372BGD0601038M36020815119012168<<<<26"),
+            },
+            "pair_score": 290.0,
+        }
+
+        confidence = build_candidate_margin_confidence(
+            best_pair,
+            [best_pair["line1"]],
+            [best_pair["line2"]],
+        )
+
+        self.assertGreaterEqual(confidence["score"], 0.7)
+        self.assertFalse(confidence["line1_runner_up_available"])
+        self.assertFalse(confidence["line2_runner_up_available"])
+        self.assertFalse(confidence["pair_runner_up_available"])
+        self.assertEqual(confidence["warnings"], [])
+
+    def test_assemble_td3_confidence_adds_tension_and_missing_ocr_warnings(self) -> None:
+        line1 = "P<PAKWAQAR<<SADIA<<<<<<<<<<<<<<<<<<<<<<<<<<"
+        line2 = "A098919372BGD0601038M36020815119012168<<<<20"
+        checks = validate_td3_checks(line2)
+        checksum_confidence = build_checksum_confidence(checks)
+        structure_confidence = build_structure_confidence(line1, line2)
+        repair_confidence = build_repair_confidence([
+            {
+                "field": "line1",
+                "position": "name",
+                "from": "WAQAR<<SADTAKKKKK",
+                "to": "WAQAR<<SADIA<<<<",
+                "reason": "name_noise_collapse",
+            }
+        ])
+        margin_confidence = {
+            "score": 0.2,
+            "line1_margin": 1.0,
+            "line2_margin": 0.5,
+            "pair_margin": 0.7,
+            "line1_margin_score": 0.0,
+            "line2_margin_score": 0.0,
+            "pair_margin_score": 0.0,
+            "line1_runner_up_available": True,
+            "line2_runner_up_available": True,
+            "pair_runner_up_available": True,
+            "warnings": ["selected_candidate_margin_small"],
+        }
+
+        confidence = assemble_td3_confidence(
+            checksum_confidence=checksum_confidence,
+            structure_confidence=structure_confidence,
+            repair_confidence=repair_confidence,
+            margin_confidence=margin_confidence,
+            ocr_confidence=None,
+            selected_meta={"line1_score": 80.0, "line2_score": 150.0, "pair_score": 230.0},
+        )
+
+        self.assertIn("composite_checksum_failed", confidence["warnings"])
+        self.assertIn("repair_checksum_tension", confidence["warnings"])
+        self.assertIn("ocr_confidence_unavailable", confidence["warnings"])
+        self.assertIn("selected_candidate_margin_small", confidence["warnings"])
+        self.assertTrue(confidence["suspicious"])
+        self.assertGreaterEqual(confidence["final_score"], 0.0)
+        self.assertLessEqual(confidence["final_score"], 0.65)
+
+    def test_extract_ocr_confidence_marks_unavailable_without_real_backend_data(self) -> None:
+        confidence = extract_ocr_confidence({"backend": "paddle", "text": "ABC"})
+
+        self.assertFalse(confidence["available"])
+        self.assertIn("ocr_confidence_unavailable", confidence["warnings"])
+
+    def test_clean_duplicate_same_text_support_does_not_trigger_small_margin_warning(self) -> None:
+        line1 = "P<BGDALAM<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<"
+        line2 = "A098919372BGD0601038M36020815119012168<<<<26"
+        checks = validate_td3_checks(line2)
+        best_pair = {
+            "line1": {"text": line1, "variant_id": "l1a", "psm": "p1", "split_label": "projection", "score": 112.0, "support_count": 3},
+            "line2": {"text": line2, "variant_id": "l2a", "psm": "p1", "split_label": "projection", "score": 158.0, "checks": checks},
+            "pair_score": 290.0,
+        }
+        line1_ranked = [
+            best_pair["line1"],
+            {"text": line1, "variant_id": "l1b", "psm": "p2", "split_label": "projection", "score": 111.5, "support_count": 3},
+            {"text": "P<BGDALAM<<SHAHADAT<<<<CCC<<<CCCCC<KCAK<<<<<", "variant_id": "l1c", "psm": "p3", "split_label": "projection", "score": 101.0},
+        ]
+        line2_ranked = [
+            best_pair["line2"],
+            {"text": line2, "variant_id": "l2b", "psm": "p2", "split_label": "projection", "score": 157.8, "checks": checks},
+            {"text": "A098919372BGD0601038M36020815119012168<<<<20", "variant_id": "l2c", "psm": "p3", "split_label": "projection", "score": 141.0, "checks": validate_td3_checks("A098919372BGD0601038M36020815119012168<<<<20")},
+        ]
+
+        confidence = build_candidate_margin_confidence(best_pair, line1_ranked, line2_ranked)
+
+        self.assertEqual(confidence["warnings"], [])
+        self.assertGreaterEqual(confidence["line1_same_text_support"], 2)
+        self.assertGreaterEqual(confidence["line2_same_text_support"], 2)
+
+    def test_missing_ocr_confidence_does_not_inflate_score(self) -> None:
+        line1 = "P<BGDALAM<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<"
+        line2 = "A098919372BGD0601038M36020815119012168<<<<26"
+        checks = validate_td3_checks(line2)
+        payload = assemble_td3_confidence(
+            checksum_confidence=build_checksum_confidence(checks),
+            structure_confidence=build_structure_confidence(line1, line2),
+            repair_confidence=build_repair_confidence([]),
+            margin_confidence={"score": 1.0, "warnings": []},
+            ocr_confidence=None,
+            selected_meta={"line1_score": 100.0, "line2_score": 150.0, "pair_score": 270.0},
+        )
+
+        self.assertEqual(payload["effective_weights"]["ocr_quality"], 0.0)
+        self.assertIsNone(payload["details"]["ocr_confidence_effective_score"])
+        self.assertIn("ocr_confidence_unavailable", payload["warnings"])
+
+    def test_exact_match_clean_case_lands_in_high_confidence_band(self) -> None:
+        line1 = "P<BGDALAM<<SHAHADAT<<<<<<<<<<<<<<<<<<<<<<<<<"
+        line2 = "A098919372BGD0601038M36020815119012168<<<<26"
+        checks = validate_td3_checks(line2)
+        best_pair = {
+            "line1": {"text": line1, "variant_id": "l1a", "psm": "p1", "split_label": "projection", "score": 112.0, "support_count": 3},
+            "line2": {"text": line2, "variant_id": "l2a", "psm": "p1", "split_label": "projection", "score": 158.0, "checks": checks},
+            "pair_score": 290.0,
+        }
+        line1_ranked = [
+            best_pair["line1"],
+            {"text": line1, "variant_id": "l1b", "psm": "p2", "split_label": "projection", "score": 111.5, "support_count": 3},
+            {"text": "P<BGDALAM<<SHAHADAT<<<<CCC<<<CCCCC<KCAK<<<<<", "variant_id": "l1c", "psm": "p3", "split_label": "projection", "score": 101.0},
+        ]
+        line2_ranked = [
+            best_pair["line2"],
+            {"text": line2, "variant_id": "l2b", "psm": "p2", "split_label": "projection", "score": 157.8, "checks": checks},
+            {"text": "A098919372BGD0601038M36020815119012168<<<<20", "variant_id": "l2c", "psm": "p3", "split_label": "projection", "score": 141.0, "checks": validate_td3_checks("A098919372BGD0601038M36020815119012168<<<<20")},
+        ]
+
+        payload = assemble_td3_confidence(
+            checksum_confidence=build_checksum_confidence(checks),
+            structure_confidence=build_structure_confidence(line1, line2),
+            repair_confidence=build_repair_confidence([]),
+            margin_confidence=build_candidate_margin_confidence(best_pair, line1_ranked, line2_ranked),
+            ocr_confidence=None,
+            selected_meta={"line1_score": 112.0, "line2_score": 158.0, "pair_score": 290.0},
+        )
+
+        self.assertGreaterEqual(payload["final_score"], 0.9)
+        self.assertFalse(payload["suspicious"])
 
 
 class TestStage2DetectionScaling(unittest.TestCase):

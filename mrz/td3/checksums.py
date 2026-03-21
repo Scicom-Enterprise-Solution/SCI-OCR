@@ -190,6 +190,44 @@ def validate_td3_checks(line2: str) -> dict:
     return result
 
 
+def build_checksum_confidence(checks: dict) -> dict:
+    weights = {
+        "document": 0.15,
+        "birth_date": 0.15,
+        "expiry_date": 0.15,
+        "personal_number": 0.15,
+        "composite": 0.40,
+    }
+
+    components = {}
+    score = 0.0
+    warnings = []
+
+    for key, weight in weights.items():
+        component = checks.get(key) or {}
+        valid = bool(component.get("valid"))
+        contribution = weight if valid else 0.0
+        score += contribution
+        components[key] = {
+            "valid": valid,
+            "weight": weight,
+            "contribution": round(contribution, 4),
+        }
+
+    if not bool((checks.get("composite") or {}).get("valid")):
+        warnings.append("composite_checksum_failed")
+
+    return {
+        "score": round(max(0.0, min(score, 1.0)), 4),
+        "weights": weights,
+        "components": components,
+        "passed_count": int(checks.get("passed_count", 0) or 0),
+        "total_count": int(checks.get("total_count", 5) or 5),
+        "composite_valid": bool(checks.get("composite_valid")),
+        "warnings": warnings,
+    }
+
+
 def validate_and_correct_mrz(line1: str, line2: str) -> tuple[str, str, dict]:
     line1 = normalize_td3_line1(line1)
     line2 = normalize_td3_line2(line2)

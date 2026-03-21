@@ -282,13 +282,17 @@ def apply_candidate_support_bonus(candidates) -> None:
         groups.add(_candidate_support_group(cand))
 
     for cand in candidates:
-        support_count = len(support_counts[cand["text"]])
+        grouped_support_count = len(support_counts[cand["text"]])
+        raw_support_count = raw_support_counts[cand["text"]]
+        support_count = grouped_support_count
+        if support_count <= 1 and raw_support_count > 1:
+            support_count = raw_support_count
         support_bonus = candidate_support_bonus(support_count)
         base_score = cand["score"]
 
         cand["base_score"] = base_score
         cand["support_count"] = support_count
-        cand["raw_support_count"] = raw_support_counts[cand["text"]]
+        cand["raw_support_count"] = raw_support_count
         cand["support_bonus"] = support_bonus
         cand["score"] = base_score + support_bonus
 
@@ -307,3 +311,41 @@ def line1_selection_penalty(candidate: dict) -> float:
             penalty += PADDLE_LINE1_SPILL_COLLAPSE_PENALTY
 
     return penalty
+
+
+def extract_ocr_confidence(candidate: dict) -> dict | None:
+    if not candidate:
+        return None
+
+    avg_confidence = candidate.get("avg_char_confidence")
+    min_confidence = candidate.get("min_char_confidence")
+    score = candidate.get("ocr_confidence_score")
+    source = candidate.get("ocr_confidence_source")
+
+    if score is None and avg_confidence is not None and min_confidence is not None:
+        score = max(0.0, min(((float(avg_confidence) * 0.6) + (float(min_confidence) * 0.4)), 1.0))
+
+    if score is None and candidate.get("line_confidence") is not None:
+        score = max(0.0, min(float(candidate["line_confidence"]), 1.0))
+        source = source or "line"
+
+    if score is None:
+        return {
+            "available": False,
+            "backend": candidate.get("backend"),
+            "avg_confidence": None,
+            "min_confidence": None,
+            "score": None,
+            "source": "none",
+            "warnings": ["ocr_confidence_unavailable"],
+        }
+
+    return {
+        "available": True,
+        "backend": candidate.get("backend"),
+        "avg_confidence": round(float(avg_confidence), 4) if avg_confidence is not None else None,
+        "min_confidence": round(float(min_confidence), 4) if min_confidence is not None else None,
+        "score": round(float(score), 4),
+        "source": source or ("char" if avg_confidence is not None and min_confidence is not None else "line"),
+        "warnings": [],
+    }

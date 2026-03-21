@@ -64,6 +64,7 @@ def extract_document(request: ExtractionRequest) -> ExtractionResponse:
         line1=record["line1"],
         line2=record["line2"],
         parsed=record.get("parsed") or {},
+        confidence=record.get("confidence"),
         duration_ms=record.get("duration_ms"),
         report_path=record.get("report_path"),
         document_id=record["document_id"],

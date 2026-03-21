@@ -280,6 +280,7 @@ def create_extraction(
         "line1": report.get("mrz", {}).get("text", {}).get("line1", ""),
         "line2": report.get("mrz", {}).get("text", {}).get("line2", ""),
         "parsed": report.get("mrz", {}).get("parsed", {}),
+        "confidence": report.get("mrz", {}).get("ocr", {}).get("confidence"),
         "report_path": report_path,
         "duration_ms": report.get("duration_ms"),
         "crop": None if input_mode_normalized == "frontend" else crop,
