@@ -9,6 +9,12 @@ import {
 import { updateControls } from "./dom.js";
 import { computeMrzGuideRect, getTransformedImageBounds, renderGuidanceSource } from "./render.js";
 
+const FACE_CASCADE_FILENAME = "haarcascade_frontalface_default.xml";
+const FACE_CASCADE_URL = `/frontend/assets/${FACE_CASCADE_FILENAME}`;
+
+let faceCascadeClassifier = null;
+let faceCascadeLoadPromise = null;
+
 export function getGuideStatus() {
   if (!state.previewImage) {
     return "No document loaded.";
@@ -67,6 +73,152 @@ export function ensureCvReady() {
     };
   }
   return false;
+}
+
+function setFaceStatus(engine, status) {
+  state.guidance.faceEngine = engine;
+  state.guidance.faceStatus = status;
+}
+
+function setFaceStatusDetail(detail) {
+  state.guidance.faceStatusDetail = detail || "";
+}
+
+async function ensureOpenCvFaceCascade() {
+  if (!ensureCvReady()) {
+    setFaceStatus("opencv", "loading");
+    setFaceStatusDetail("");
+    return false;
+  }
+
+  if (faceCascadeClassifier) {
+    setFaceStatus("opencv", "ready");
+    setFaceStatusDetail("");
+    return true;
+  }
+
+  if (faceCascadeLoadPromise) {
+    return faceCascadeLoadPromise;
+  }
+
+  setFaceStatus("opencv", "loading");
+  setFaceStatusDetail("");
+  updateControls();
+
+  faceCascadeLoadPromise = (async () => {
+    try {
+      const cv = window.cv;
+      if (typeof cv.CascadeClassifier !== "function") {
+        throw new Error("CascadeClassifier missing in OpenCV.js build");
+      }
+      if (typeof cv.FS_createDataFile !== "function") {
+        throw new Error("Emscripten FS API unavailable");
+      }
+
+      const response = await fetch(FACE_CASCADE_URL);
+      if (!response.ok) {
+        throw new Error(`Failed to load face cascade: ${response.status}`);
+      }
+
+      const data = new Uint8Array(await response.arrayBuffer());
+      let exists = false;
+      if (typeof cv.FS_analyzePath === "function") {
+        exists = cv.FS_analyzePath(`/${FACE_CASCADE_FILENAME}`).exists;
+      } else if (typeof cv.FS_readdir === "function") {
+        exists = cv.FS_readdir("/").includes(FACE_CASCADE_FILENAME);
+      }
+
+      if (!exists) {
+        cv.FS_createDataFile("/", FACE_CASCADE_FILENAME, data, true, false, false);
+      }
+
+      const classifier = new cv.CascadeClassifier();
+      if (!classifier.load(`/${FACE_CASCADE_FILENAME}`) && !classifier.load(FACE_CASCADE_FILENAME)) {
+        classifier.delete();
+        throw new Error("OpenCV cascade load returned false");
+      }
+
+      faceCascadeClassifier = classifier;
+      setFaceStatus("opencv", "ready");
+      setFaceStatusDetail("");
+      return true;
+    } catch (error) {
+      faceCascadeClassifier = null;
+      setFaceStatus("opencv", "error");
+      setFaceStatusDetail(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      updateControls();
+    }
+  })();
+
+  const ready = await faceCascadeLoadPromise;
+  faceCascadeLoadPromise = null;
+  return ready;
+}
+
+function detectFaceWithOpenCv() {
+  if (!faceCascadeClassifier) {
+    return false;
+  }
+
+  renderGuidanceSource(guidanceCanvas, guidanceCtx);
+  const cv = window.cv;
+  let src = null;
+  let gray = null;
+  let faces = null;
+
+  try {
+    src = cv.imread(guidanceCanvas);
+    gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    cv.equalizeHist(gray, gray);
+
+    faces = new cv.RectVector();
+    const minSize = new cv.Size(
+      Math.max(36, Math.round(gray.cols * 0.08)),
+      Math.max(36, Math.round(gray.rows * 0.08)),
+    );
+    faceCascadeClassifier.detectMultiScale(gray, faces, 1.1, 3, 0, minSize, new cv.Size());
+
+    if (faces.size() < 1) {
+      state.guidance.faceRect = null;
+      state.guidance.faceConfidence = 0;
+      return true;
+    }
+
+    let best = null;
+    for (let i = 0; i < faces.size(); i += 1) {
+      const rect = faces.get(i);
+      const area = rect.width * rect.height;
+      if (!best || area > best.area) {
+        best = { x: rect.x, y: rect.y, width: rect.width, height: rect.height, area };
+      }
+    }
+
+    state.guidance.faceRect = best ? {
+      x: best.x,
+      y: best.y,
+      width: best.width,
+      height: best.height,
+    } : null;
+    state.guidance.faceConfidence = best ? 0.85 : 0;
+    return true;
+  } catch (error) {
+    state.guidance.faceRect = null;
+    state.guidance.faceConfidence = 0;
+    return false;
+  } finally {
+    if (faces) {
+      faces.delete();
+    }
+    if (gray) {
+      gray.delete();
+    }
+    if (src) {
+      src.delete();
+    }
+  }
 }
 
 function detectProjectionCandidate(cv, thresh, analysisRect, guideRect) {
@@ -388,7 +540,7 @@ export function detectMrzGuideRect() {
 }
 
 export async function detectFaceGuidance(timestampMs) {
-  if (!state.previewImage || typeof window.FaceDetector === "undefined") {
+  if (!state.previewImage) {
     return;
   }
   if (state.guidance.facePending || (timestampMs - state.guidance.lastFaceMs) < FACE_ANALYSIS_INTERVAL_MS) {
@@ -400,27 +552,48 @@ export async function detectFaceGuidance(timestampMs) {
   renderGuidanceSource(guidanceCanvas, guidanceCtx);
 
   try {
-    const detector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
-    const faces = await detector.detect(guidanceCanvas);
-    if (faces.length > 0) {
-      const face = faces
-        .map((entry) => ({
-          x: entry.boundingBox.x,
-          y: entry.boundingBox.y,
-          width: entry.boundingBox.width,
-          height: entry.boundingBox.height,
-          area: entry.boundingBox.width * entry.boundingBox.height,
-        }))
-        .sort((a, b) => b.area - a.area)[0];
-      state.guidance.faceRect = face;
-      state.guidance.faceConfidence = 1;
-    } else {
+    if (typeof window.FaceDetector !== "undefined") {
+      const detector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
+      const faces = await detector.detect(guidanceCanvas);
+      setFaceStatus("browser", "ready");
+      setFaceStatusDetail("");
+      if (faces.length > 0) {
+        const face = faces
+          .map((entry) => ({
+            x: entry.boundingBox.x,
+            y: entry.boundingBox.y,
+            width: entry.boundingBox.width,
+            height: entry.boundingBox.height,
+            area: entry.boundingBox.width * entry.boundingBox.height,
+          }))
+          .sort((a, b) => b.area - a.area)[0];
+        state.guidance.faceRect = face;
+        state.guidance.faceConfidence = 1;
+      } else {
+        state.guidance.faceRect = null;
+        state.guidance.faceConfidence = 0;
+      }
+      return;
+    }
+
+    const cascadeReady = await ensureOpenCvFaceCascade();
+    if (!cascadeReady) {
       state.guidance.faceRect = null;
       state.guidance.faceConfidence = 0;
+      return;
     }
+
+    detectFaceWithOpenCv();
   } catch (error) {
     state.guidance.faceRect = null;
     state.guidance.faceConfidence = 0;
+    if (typeof window.FaceDetector !== "undefined") {
+      setFaceStatus("browser", "error");
+      setFaceStatusDetail(error instanceof Error ? error.message : String(error));
+    } else if (state.guidance.faceEngine === "none") {
+      setFaceStatus("opencv", "error");
+      setFaceStatusDetail(error instanceof Error ? error.message : String(error));
+    }
   } finally {
     state.guidance.facePending = false;
   }
@@ -480,8 +653,21 @@ export function buildGuidanceCard() {
       : "MRZ candidate not locked yet",
   ];
 
-  if (typeof window.FaceDetector === "undefined") {
-    items.push("Face guidance API unavailable in this browser");
+  if (state.guidance.faceEngine === "browser") {
+    items.push(state.guidance.faceRect ? "Face guidance: browser API detected a face" : "Face guidance: browser API ready");
+  } else if (state.guidance.faceEngine === "opencv") {
+    if (state.guidance.faceStatus === "loading") {
+      items.push("Face guidance: OpenCV.js cascade loading");
+    } else if (state.guidance.faceStatus === "ready") {
+      items.push(state.guidance.faceRect ? "Face guidance: OpenCV.js detected a face" : "Face guidance: OpenCV.js ready");
+    } else {
+      items.push("Face guidance: OpenCV.js cascade unavailable");
+      if (state.guidance.faceStatusDetail) {
+        items.push(`Face guidance detail: ${state.guidance.faceStatusDetail}`);
+      }
+    }
+  } else if (typeof window.FaceDetector === "undefined") {
+    items.push("Face guidance: waiting for OpenCV.js fallback");
   } else if (state.guidance.faceRect) {
     items.push("Face detected for placement reference");
   } else {
