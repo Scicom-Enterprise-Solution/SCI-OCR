@@ -270,6 +270,19 @@ def repair_given_name_token(token: str) -> tuple[str, dict]:
 
     raw_score = _name_token_score(raw)
 
+    # Preserve short, already-plausible clean tokens. These are high-risk to
+    # "repair" heuristically and have caused visible-truth regressions such as
+    # LIM -> IIN in line 1 surname handling.
+    if len(raw) <= 3 and raw_score >= 12:
+        return raw, {
+            "changed": False,
+            "from": raw,
+            "to": raw,
+            "reason": "short_token_preserved",
+            "candidates_considered": 1,
+            "best_score": raw_score,
+        }
+
     candidates = {
         c for c in _generate_token_variants(raw, max_edits=2)
         if re.fullmatch(r"[A-Z]+", c)

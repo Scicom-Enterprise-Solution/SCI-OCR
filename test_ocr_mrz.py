@@ -118,6 +118,12 @@ class TestLine1Repair(unittest.TestCase):
         self.assertEqual(repaired, "ADEELA")
         self.assertTrue(meta["changed"])
 
+    def test_repair_given_name_token_preserves_short_clean_surname(self) -> None:
+        repaired, meta = repair_given_name_token("LIM")
+
+        self.assertEqual(repaired, "LIM")
+        self.assertFalse(meta["changed"])
+
     def test_repair_given_name_zone_trims_ocr_noise_and_restores_sadia(self) -> None:
         token, tail, meta = repair_given_name_zone(
             "PAK",
@@ -877,6 +883,8 @@ class TestChecksumFieldRepair(unittest.TestCase):
         self.assertEqual(repaired, "551356455")
 
 
+
+
 class TestPaddleLine1Repair(unittest.TestCase):
     def test_paddle_repair_skips_single_separator_name_zone(self) -> None:
         line = "PRMDVYOOSUFAZYANFARHATH<<<<<<<<<<<<<<<<<<<<<"
@@ -926,7 +934,7 @@ class TestPaddleOcrAdapter(unittest.TestCase):
 
         self.assertEqual(kwargs["ocr_version"], "PP-OCRv5")
         self.assertEqual(kwargs["text_detection_model_name"], "PP-OCRv5_server_det")
-        self.assertEqual(kwargs["text_recognition_model_name"], "en_PP-OCRv5_server_rec")
+        self.assertEqual(kwargs["text_recognition_model_name"], "PP-OCRv5_server_rec")
         self.assertEqual(kwargs["text_rec_score_thresh"], 0.83)
 
     def test_build_paddle_ocr_kwargs_respects_explicit_model_names(self) -> None:
@@ -950,7 +958,7 @@ class TestPaddleOcrAdapter(unittest.TestCase):
             os.environ,
             {
                 "PADDLEOCR_TEXT_DETECTION_MODEL_NAME": "PP-OCRv5_mobile_det",
-                "PADDLEOCR_TEXT_RECOGNITION_MODEL_NAME": "en_PP-OCRv5_server_rec",
+                "PADDLEOCR_TEXT_RECOGNITION_MODEL_NAME": "PP-OCRv5_server_rec",
                 "PADDLEOCR_DET_MODEL_VARIANT": "server",
                 "PADDLEOCR_REC_MODEL_VARIANT": "mobile",
             },
@@ -959,7 +967,7 @@ class TestPaddleOcrAdapter(unittest.TestCase):
             kwargs = build_paddle_ocr_kwargs(FakePaddleOCR, "en", False)
 
         self.assertEqual(kwargs["text_detection_model_name"], "PP-OCRv5_mobile_det")
-        self.assertEqual(kwargs["text_recognition_model_name"], "en_PP-OCRv5_server_rec")
+        self.assertEqual(kwargs["text_recognition_model_name"], "PP-OCRv5_server_rec")
 
     def test_paddle_ocr_image_converts_grayscale_to_bgr(self) -> None:
         seen = {}

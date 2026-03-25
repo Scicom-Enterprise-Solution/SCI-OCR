@@ -47,13 +47,13 @@ The project loads values from `.env` automatically (if present).
 - `OCR_BACKEND` - OCR backend selection: `tesseract`, `paddle`, or `auto`
 - `PADDLEOCR_LANG` - Optional PaddleOCR language code when PaddleOCR is enabled
 - `PADDLEOCR_USE_GPU` - Optional boolean for PaddleOCR GPU inference
-- `PADDLEOCR_DET_MODEL_VARIANT` - Optional PP-OCRv5 detector family override: `mobile` or `server`
-- `PADDLEOCR_REC_MODEL_VARIANT` - Optional PP-OCRv5 recognizer family override: `mobile` or `server`
-- `PADDLEOCR_TEXT_DETECTION_MODEL_NAME` - Optional explicit Paddle text-detection model name override
-- `PADDLEOCR_TEXT_RECOGNITION_MODEL_NAME` - Optional explicit Paddle text-recognition model name override
-- `PADDLEOCR_TEXT_DETECTION_MODEL_DIR` - Optional explicit local Paddle text-detection model directory
-- `PADDLEOCR_TEXT_RECOGNITION_MODEL_DIR` - Optional explicit local Paddle text-recognition model directory
-- `PADDLEOCR_TEXT_REC_SCORE_THRESH` - Optional Paddle recognition score threshold passthrough
+- `PADDLEOCR_DET_MODEL_VARIANT` - Optional PP-OCRv5 detector family override: blank, `mobile`, or `server`
+- `PADDLEOCR_REC_MODEL_VARIANT` - Optional PP-OCRv5 recognizer family override: blank, `mobile`, or `server`
+- `PADDLEOCR_TEXT_DETECTION_MODEL_NAME` - Optional explicit Paddle text-detection model name override, for example `PP-OCRv5_server_det`
+- `PADDLEOCR_TEXT_RECOGNITION_MODEL_NAME` - Optional explicit Paddle text-recognition model name override, for example `PP-OCRv5_server_rec`
+- `PADDLEOCR_TEXT_DETECTION_MODEL_DIR` - Optional filesystem path to a local Paddle text-detection model directory
+- `PADDLEOCR_TEXT_RECOGNITION_MODEL_DIR` - Optional filesystem path to a local Paddle text-recognition model directory
+- `PADDLEOCR_TEXT_REC_SCORE_THRESH` - Optional Paddle recognition score threshold float from `0.0` to `1.0`
 - `PADDLE_PDX_CACHE_HOME` - Optional Paddle model/cache directory. Prefer a project-relative path such as `.paddlex` for portability across servers.
 - `FAST_OCR` - Optional speed-only mode. When `true`, Stage 3 uses a much smaller OCR search space for faster runs, but it can reduce name-field accuracy.
 - `PADDLE_PROFILE` - Paddle search profile: `exhaustive`, `balanced`, or `fast`

@@ -140,8 +140,10 @@ def _resolve_paddle_det_model_name(variant: str) -> str | None:
 def _resolve_paddle_rec_model_name(lang: str, variant: str) -> str | None:
     if not variant:
         return None
+    if variant == "server":
+        return "PP-OCRv5_server_rec"
     if lang == "en":
-        return f"en_PP-OCRv5_{variant}_rec"
+        return f"en_PP-OCRv5_mobile_rec"
     return None
 
 
