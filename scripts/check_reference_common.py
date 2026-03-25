@@ -12,11 +12,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from env_utils import load_env_file, parse_bool_env
+load_env_file()
+
 from document_inputs import DocumentInputError
 from pipelines.mrz_pipeline import process_document
 from path_utils import to_repo_relative
 from samples.reference_utils import normalize_reference_samples
-from logger_utils import is_debug_enabled
+from logger_utils import is_debug_enabled, print_runtime_debug_status
 
 
 GREEN = "\033[32m"
@@ -95,6 +98,7 @@ def _build_combined_report_path(backend: str) -> pathlib.Path:
 
 
 def run_reference_set(backend: str) -> int:
+    print_runtime_debug_status(f"reference_runner:{backend}")
     run_started_at = time.perf_counter()
     refs_path = ROOT / "samples" / "reference_td3_clean.json"
     with refs_path.open("r", encoding="utf-8") as f:
@@ -140,7 +144,7 @@ def run_reference_set(backend: str) -> int:
     original_backend = os.environ.get("OCR_BACKEND")
     os.environ["OCR_BACKEND"] = backend
 
-    use_face_hint = os.getenv("USE_FACE_HINT", "False").strip().lower() in {"1", "true", "yes", "on"}
+    use_face_hint = parse_bool_env("USE_FACE_HINT", False)
     debug = is_debug_enabled()
 
     try:

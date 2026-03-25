@@ -7,27 +7,20 @@ import os
 import sys
 import cv2
 import numpy as np
-from env_utils import load_env_file
+from env_utils import load_env_file, parse_int_env
 from document_inputs.pdf_input import render_pdf_page
 from logger_utils import is_debug_enabled
 from path_utils import to_repo_relative
-
-
-load_env_file()
 
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-PDF_PATH = os.getenv("PDF_PATH", "passport.pdf")   # Input PDF (override via CLI arg)
-OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output")
+PDF_PATH = None
+OUTPUT_DIR = None
 DPI = 300
-ALIGNED_MAX_DIM = int(os.getenv("ALIGNED_MAX_DIM", "1200"))
-
-# Canny thresholds — adjust if edges are missed or noisy
-CANNY_LOW = 30
-CANNY_HIGH = 100
+ALIGNED_MAX_DIM = None
 
 # Gaussian blur kernel size (must be odd)
 BLUR_KERNEL = (5, 5)
@@ -40,9 +33,6 @@ APPROX_EPSILON = 0.02
 # instead of the large-scale document boundary.
 DETECTION_MAX_DIM = 1000
 
-# Morphological close kernel applied after Canny to bridge boundary gaps
-CLOSE_KERNEL_SIZE = 15
-
 # Minimum contour area as a fraction of the detection image area
 MIN_AREA_FRACTION = 0.05
 
@@ -50,11 +40,32 @@ MIN_AREA_FRACTION = 0.05
 # Some photos produce noisy boundaries where 0.02 is too strict.
 APPROX_EPSILON_FACTORS = (0.02, 0.03, 0.04, 0.05, 0.08)
 
+# Canny thresholds — adjust if edges are missed or noisy
+CANNY_LOW = 30
+CANNY_HIGH = 100
+
+# Morphological close kernel applied after Canny to bridge boundary gaps
+CLOSE_KERNEL_SIZE = 15
+
 # Acceptable aspect-ratio range for the document rectangle candidate.
 # Covers both landscape and portrait captures with perspective skew.
 MIN_DOC_ASPECT_RATIO = 0.45
 MAX_DOC_ASPECT_RATIO = 2.40
 ESSENTIAL_OUTPUTS = {"aligned_passport.png"}
+
+
+def get_default_pdf_path() -> str:
+    load_env_file()
+    return os.getenv("PDF_PATH", "passport.pdf")
+
+
+def get_output_dir() -> str:
+    load_env_file()
+    return OUTPUT_DIR or os.getenv("OUTPUT_DIR", "output")
+
+
+def get_aligned_max_dim() -> int:
+    return parse_int_env("ALIGNED_MAX_DIM", 1200)
 
 
 # ---------------------------------------------------------------------------
@@ -294,12 +305,15 @@ def perspective_correction(
     return warped
 
 
-def resize_aligned_image(img_bgr: np.ndarray, max_dim: int = ALIGNED_MAX_DIM) -> tuple[np.ndarray, dict]:
+def resize_aligned_image(img_bgr: np.ndarray, max_dim: int | None = None) -> tuple[np.ndarray, dict]:
     """
     Cap the aligned working image to a predictable maximum dimension for
     Stage 2/3. This preserves aspect ratio and avoids pushing oversized
     source images through MRZ detection and OCR at full original resolution.
     """
+    if max_dim is None:
+        max_dim = get_aligned_max_dim()
+
     h, w = img_bgr.shape[:2]
     longest = max(h, w)
     meta = {
@@ -340,7 +354,9 @@ def save(img: np.ndarray, filename: str) -> None:
     """Save an image to the output directory and print a confirmation."""
     if not is_debug_enabled() and filename not in ESSENTIAL_OUTPUTS:
         return
-    path = os.path.join(OUTPUT_DIR, filename)
+    output_dir = get_output_dir()
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, filename)
     cv2.imwrite(path, img)
     print(f"[Save]  {path}")
 
@@ -351,10 +367,11 @@ def save(img: np.ndarray, filename: str) -> None:
 
 def main() -> None:
     # Allow overriding the PDF path via the first CLI argument
-    pdf_path = sys.argv[1] if len(sys.argv) > 1 else PDF_PATH
+    pdf_path = sys.argv[1] if len(sys.argv) > 1 else get_default_pdf_path()
 
     # Create output directory (safe if it already exists)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    output_dir = get_output_dir()
+    os.makedirs(output_dir, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Step 1 — Render PDF → numpy image
@@ -392,7 +409,7 @@ def main() -> None:
     aligned, _ = resize_aligned_image(aligned)
     save(aligned, "aligned_passport.png")
 
-    print("\n[Pipeline] Done. All outputs written to:", to_repo_relative(OUTPUT_DIR))
+    print("\n[Pipeline] Done. All outputs written to:", to_repo_relative(output_dir))
 
 
 if __name__ == "__main__":

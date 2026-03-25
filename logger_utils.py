@@ -3,24 +3,24 @@ import os
 from typing import Any
 from datetime import datetime, timezone
 
-
-def _parse_bool_env(name: str, default: bool) -> bool:
-    raw = os.getenv(name, "")
-    if not raw.strip():
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-DEBUG = _parse_bool_env("DEBUG", False)
-LOG_FORMAT = (os.getenv("LOG_FORMAT", "human").strip().lower() or "human")
+from env_utils import load_env_file, parse_bool_env
 
 
 def is_debug_enabled() -> bool:
-    return DEBUG
+    return parse_bool_env("DEBUG", False)
 
 
 def use_json_logs() -> bool:
-    return LOG_FORMAT == "json"
+    load_env_file()
+    return (os.getenv("LOG_FORMAT", "human").strip().lower() or "human") == "json"
+
+
+def print_runtime_debug_status(context: str = "startup") -> None:
+    debug = is_debug_enabled()
+    if use_json_logs():
+        log_event("runtime_flags", context=context, debug=debug)
+        return
+    print(f"[Runtime] DEBUG={debug} ({context})")
 
 
 def log_event(event: str, *, level: str = "info", **fields: Any) -> None:

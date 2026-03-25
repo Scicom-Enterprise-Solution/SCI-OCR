@@ -5,6 +5,7 @@ import time
 import cv2
 
 from document_inputs import DocumentInputError, SUPPORTED_IMAGE_EXTS, load_document_input
+from env_utils import load_env_file
 from face_detection import orient_with_face_hint, extract_face_crop, draw_face_box
 from logger_utils import print_reference_summary
 from mrz.td3.rotation import detect_mrz_with_rotation_fallback
@@ -19,6 +20,11 @@ from mrz.td3 import ocr_pipeline as stage3
 
 def _make_logger(enabled: bool):
     return print if enabled else (lambda *args, **kwargs: None)
+
+
+def _get_base_output_dir() -> str:
+    load_env_file()
+    return os.getenv("OUTPUT_DIR", "output")
 
 
 def build_reference_comparison(filename: str, line1: str, line2: str) -> dict:
@@ -122,7 +128,7 @@ def process_document(
         dpi=stage1.DPI,
     )
     source_name = input_path or loaded_input.filename
-    base_output_dir = os.getenv("OUTPUT_DIR", stage1.OUTPUT_DIR)
+    base_output_dir = _get_base_output_dir()
     output_prefix = build_output_prefix(loaded_input.filename)
     output_dir = os.path.join(base_output_dir, output_prefix)
 

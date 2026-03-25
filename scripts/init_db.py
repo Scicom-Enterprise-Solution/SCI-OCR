@@ -6,6 +6,9 @@ ROOT = os.path.dirname(os.path.dirname(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from env_utils import load_env_file
+
+load_env_file()
 
 from api.config import settings
 from db import init_db

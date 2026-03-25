@@ -3,6 +3,8 @@ import tempfile
 import unittest
 
 from env_utils import load_env_file
+import logger_utils
+from api.config import settings
 
 
 class TestLoadEnvFile(unittest.TestCase):
@@ -79,6 +81,33 @@ Q3=no_quotes
         load_env_file(missing_path)
 
         self.assertTrue(True)
+
+    def test_is_debug_enabled_reads_env_dynamically(self) -> None:
+        os.environ["DEBUG"] = "true"
+        self.assertTrue(logger_utils.is_debug_enabled())
+
+        os.environ["DEBUG"] = "false"
+        self.assertFalse(logger_utils.is_debug_enabled())
+
+    def test_api_settings_reads_current_env_dynamically(self) -> None:
+        os.environ["API_HOST"] = "127.0.0.1"
+        os.environ["API_PORT"] = "3000"
+        self.assertEqual(settings.api_host, "127.0.0.1")
+        self.assertEqual(settings.api_port, 3000)
+
+        os.environ["API_HOST"] = "0.0.0.0"
+        os.environ["API_PORT"] = "9000"
+        self.assertEqual(settings.api_host, "0.0.0.0")
+        self.assertEqual(settings.api_port, 9000)
+
+    def test_api_settings_override_still_wins_until_removed(self) -> None:
+        os.environ["API_PORT"] = "3000"
+        settings.api_port = 8123
+        self.addCleanup(lambda: hasattr(settings, "_overrides") and settings._overrides.pop("api_port", None))
+        self.assertEqual(settings.api_port, 8123)
+
+        del settings.api_port
+        self.assertEqual(settings.api_port, 3000)
 
 
 if __name__ == "__main__":

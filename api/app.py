@@ -2,6 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from env_utils import load_env_file
+from logger_utils import print_runtime_debug_status
+
+load_env_file()
+
 from api.config import settings
 from api.deps import ensure_api_state
 from api.routes import extraction, llm, references, uploads
@@ -32,3 +37,8 @@ app.mount("/frontend", StaticFiles(directory="frontend", html=True), name="front
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.on_event("startup")
+def log_startup_debug_flag() -> None:
+    print_runtime_debug_status("api_startup")

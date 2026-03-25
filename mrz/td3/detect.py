@@ -20,15 +20,20 @@ from logger_utils import is_debug_enabled
 from path_utils import to_repo_relative
 
 
-load_env_file()
-
-
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-OUTPUT_DIR  = os.getenv("OUTPUT_DIR", "output")
-INPUT_IMAGE = os.path.join(OUTPUT_DIR, "aligned_passport.png")
+OUTPUT_DIR = None
+
+
+def get_output_dir() -> str:
+    load_env_file()
+    return OUTPUT_DIR or os.getenv("OUTPUT_DIR", "output")
+
+
+def get_input_image_path() -> str:
+    return os.path.join(get_output_dir(), "aligned_passport.png")
 
 # Blackhat kernel — wide enough to span an MRZ character, short enough to
 # stay within a single text line.  Typical OCR-B character is ~30-40px wide
@@ -78,7 +83,9 @@ def save(img: np.ndarray, filename: str) -> None:
     """Save an image to OUTPUT_DIR and print a confirmation."""
     if not is_debug_enabled() and filename not in ESSENTIAL_OUTPUTS:
         return
-    path = os.path.join(OUTPUT_DIR, filename)
+    output_dir = get_output_dir()
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, filename)
     cv2.imwrite(path, img)
     print(f"[Save]  {path}")
 
@@ -499,9 +506,10 @@ def draw_debug_boxes(
 
 def main() -> None:
     # Allow overriding input image via CLI argument
-    input_path = sys.argv[1] if len(sys.argv) > 1 else INPUT_IMAGE
+    input_path = sys.argv[1] if len(sys.argv) > 1 else get_input_image_path()
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    output_dir = get_output_dir()
+    os.makedirs(output_dir, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Step 1 — Load
@@ -568,7 +576,7 @@ def main() -> None:
     save(debug_img, "mrz_detected.png")
 
     print(f"\n[Pipeline] Done. MRZ region saved to: "
-          f"{to_repo_relative(os.path.join(OUTPUT_DIR, 'mrz_region.png'))}")
+          f"{to_repo_relative(os.path.join(output_dir, 'mrz_region.png'))}")
 
 
 if __name__ == "__main__":

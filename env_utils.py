@@ -18,3 +18,29 @@ def load_env_file(path: str = ".env") -> None:
 
             if key and key not in os.environ:
                 os.environ[key] = value
+
+
+def parse_bool_env(name: str, default: bool) -> bool:
+    load_env_file()
+    raw = os.getenv(name, "")
+    if not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def parse_int_env(name: str, default: int) -> int:
+    load_env_file()
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def parse_csv_env(name: str, default: list[str]) -> list[str]:
+    load_env_file()
+    raw = os.getenv(name, "")
+    values = [item.strip() for item in raw.split(",") if item.strip()]
+    return values or default[:]

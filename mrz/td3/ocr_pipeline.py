@@ -110,9 +110,6 @@ from ocr_backends.tesseract_backend import (
 )
 from ocr_backends.paddle_backend import extract_paddle_lines as paddle_backend_extract_lines
 
-
-load_env_file()
-
 warnings.filterwarnings(
     "ignore",
     message=r".*RequestsDependencyWarning: urllib3.*|urllib3 .* doesn't match a supported version.*",
@@ -125,13 +122,7 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
-OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output")
-
-resolved_tesseract_cmd = configure_tesseract_cmd()
-
-TESSERACT_LANG = os.getenv("TESSERACT_LANG", "eng").strip() or "eng"
-OCR_BACKEND = os.getenv("OCR_BACKEND", "paddle").strip().lower() or "paddle"
-PADDLEOCR_LANG = os.getenv("PADDLEOCR_LANG", "en").strip() or "en"
+OUTPUT_DIR = None
 
 
 def _parse_bool_env(name: str, default: bool) -> bool:
@@ -166,9 +157,6 @@ def _parse_choice_env(name: str, default: str, allowed: set[str]) -> str:
     return default
 
 
-PADDLEOCR_USE_GPU = _parse_bool_env("PADDLEOCR_USE_GPU", False)
-
-
 def _parse_int_list_env(name: str, default: list[int]) -> list[int]:
     raw = os.getenv(name, "")
     if not raw.strip():
@@ -191,18 +179,6 @@ def _resolve_oems(lang: str) -> list[int]:
     requested = _parse_int_list_env("TESSERACT_OEMS", [1])
     return resolve_tesseract_oems(lang, requested)
 
-
-FAST_OCR = _parse_bool_env("FAST_OCR", False)
-PADDLE_FAST = _parse_bool_env("PADDLE_FAST", True)
-PADDLE_PROFILE = _parse_choice_env("PADDLE_PROFILE", "exhaustive", {"exhaustive", "balanced", "fast"})
-MRZ_VARIANT_WORKERS = _parse_positive_int_env("MRZ_VARIANT_WORKERS", min(4, os.cpu_count() or 1))
-TESSERACT_PSMS = _parse_int_list_env(
-    "TESSERACT_PSMS",
-    [7] if FAST_OCR else [7, 6, 13],
-)
-TESSERACT_OEMS = _resolve_oems(TESSERACT_LANG)
-
-OCR_CONFIGS = build_ocr_configs(TESSERACT_OEMS, TESSERACT_PSMS)
 ESSENTIAL_OUTPUTS = {
     "mrz_clean.png",
     "mrz_line1.png",
@@ -212,6 +188,43 @@ ESSENTIAL_OUTPUTS = {
 }
 
 
+def _get_output_dir() -> str:
+    load_env_file()
+    return OUTPUT_DIR or os.getenv("OUTPUT_DIR", "output")
+
+
+def _get_runtime_config() -> dict:
+    load_env_file()
+    configure_tesseract_cmd()
+    tesseract_lang = os.getenv("TESSERACT_LANG", "eng").strip() or "eng"
+    ocr_backend = os.getenv("OCR_BACKEND", "paddle").strip().lower() or "paddle"
+    paddle_lang = os.getenv("PADDLEOCR_LANG", "en").strip() or "en"
+    paddle_use_gpu = _parse_bool_env("PADDLEOCR_USE_GPU", False)
+    fast_ocr = _parse_bool_env("FAST_OCR", False)
+    paddle_fast = _parse_bool_env("PADDLE_FAST", True)
+    paddle_profile = _parse_choice_env("PADDLE_PROFILE", "exhaustive", {"exhaustive", "balanced", "fast"})
+    variant_workers = _parse_positive_int_env("MRZ_VARIANT_WORKERS", min(4, os.cpu_count() or 1))
+    tesseract_psms = _parse_int_list_env(
+        "TESSERACT_PSMS",
+        [7] if fast_ocr else [7, 6, 13],
+    )
+    tesseract_oems = _resolve_oems(tesseract_lang)
+    return {
+        "output_dir": _get_output_dir(),
+        "tesseract_lang": tesseract_lang,
+        "ocr_backend": ocr_backend,
+        "paddle_lang": paddle_lang,
+        "paddle_use_gpu": paddle_use_gpu,
+        "fast_ocr": fast_ocr,
+        "paddle_fast": paddle_fast,
+        "paddle_profile": paddle_profile,
+        "variant_workers": variant_workers,
+        "tesseract_psms": tesseract_psms,
+        "tesseract_oems": tesseract_oems,
+        "ocr_configs": build_ocr_configs(tesseract_oems, tesseract_psms),
+    }
+
+
 # -------------------------------------------------------
 # BASIC IO
 # -------------------------------------------------------
@@ -219,8 +232,9 @@ ESSENTIAL_OUTPUTS = {
 def save(img, filename):
     if not is_debug_enabled() and filename not in ESSENTIAL_OUTPUTS:
         return
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    path = os.path.join(OUTPUT_DIR, filename)
+    output_dir = _get_output_dir()
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, filename)
     cv2.imwrite(path, img)
     print(f"[Save]  {path}")
 
@@ -234,18 +248,25 @@ def save(img, filename):
 # PREPROCESSING
 # -------------------------------------------------------
 
-def _ocr_search_profile() -> dict:
+def _ocr_search_profile(runtime_config: dict | None = None) -> dict:
+    runtime_config = runtime_config or _get_runtime_config()
     return ocr_search_profile(
-        FAST_OCR,
-        paddle_fast=(PADDLE_FAST or PADDLE_PROFILE == "fast"),
-        paddle_profile=PADDLE_PROFILE,
-        ocr_backend=OCR_BACKEND,
+        runtime_config["fast_ocr"],
+        paddle_fast=(runtime_config["paddle_fast"] or runtime_config["paddle_profile"] == "fast"),
+        paddle_profile=runtime_config["paddle_profile"],
+        ocr_backend=runtime_config["ocr_backend"],
     )
 
 
-def _prepare_variants(gray, prefix: str, profile: dict | None = None):
-    active_profile = dict(profile or _ocr_search_profile())
-    active_profile.setdefault("variant_workers", MRZ_VARIANT_WORKERS)
+def _prepare_variants(
+    gray,
+    prefix: str,
+    profile: dict | None = None,
+    runtime_config: dict | None = None,
+):
+    runtime_config = runtime_config or _get_runtime_config()
+    active_profile = dict(profile or _ocr_search_profile(runtime_config))
+    active_profile.setdefault("variant_workers", runtime_config["variant_workers"])
     return prepare_variants(gray, prefix, active_profile)
 
 
@@ -266,18 +287,24 @@ def build_split_candidates(gray, base_meta: dict, profile: dict | None = None):
 
 
 def estimate_ocr_search_space() -> dict:
+    runtime_config = _get_runtime_config()
     return estimate_ocr_search_space_impl(
-        fast_ocr=FAST_OCR,
-        tesseract_psms=TESSERACT_PSMS,
-        tesseract_oems=TESSERACT_OEMS,
-        paddle_fast=(PADDLE_FAST or PADDLE_PROFILE == "fast"),
-        paddle_profile=PADDLE_PROFILE,
-        ocr_backend=OCR_BACKEND,
+        fast_ocr=runtime_config["fast_ocr"],
+        tesseract_psms=runtime_config["tesseract_psms"],
+        tesseract_oems=runtime_config["tesseract_oems"],
+        paddle_fast=(runtime_config["paddle_fast"] or runtime_config["paddle_profile"] == "fast"),
+        paddle_profile=runtime_config["paddle_profile"],
+        ocr_backend=runtime_config["ocr_backend"],
     )
 
 
-def _should_early_accept_paddle_split(split_info: dict, line1_ranked: list[dict], line2_ranked: list[dict]) -> bool:
-    if OCR_BACKEND != "paddle" or not PADDLE_FAST:
+def _should_early_accept_paddle_split(
+    split_info: dict,
+    line1_ranked: list[dict],
+    line2_ranked: list[dict],
+    runtime_config: dict,
+) -> bool:
+    if runtime_config["ocr_backend"] != "paddle" or not runtime_config["paddle_fast"]:
         return False
     if split_info.get("label") != "projection":
         return False
@@ -296,8 +323,12 @@ def _should_early_accept_paddle_split(split_info: dict, line1_ranked: list[dict]
     )
 
 
-def _auto_requires_tesseract(line1_candidates: list[dict], line2_candidates: list[dict]) -> bool:
-    if OCR_BACKEND != "auto":
+def _auto_requires_tesseract(
+    line1_candidates: list[dict],
+    line2_candidates: list[dict],
+    runtime_config: dict,
+) -> bool:
+    if runtime_config["ocr_backend"] != "auto":
         return False
     if not line1_candidates or not line2_candidates:
         return True
@@ -316,7 +347,7 @@ def _auto_requires_tesseract(line1_candidates: list[dict], line2_candidates: lis
     )
 
 
-def _run_auto_paddle_batches(prepared_splits: list[dict]) -> list[dict]:
+def _run_auto_paddle_batches(prepared_splits: list[dict], runtime_config: dict) -> list[dict]:
     split_results = [{"line1": [], "line2": []} for _ in prepared_splits]
     line1_jobs: list[tuple[int, dict]] = []
     line1_images: list[np.ndarray] = []
@@ -335,8 +366,8 @@ def _run_auto_paddle_batches(prepared_splits: list[dict]) -> list[dict]:
         line1_texts = _paddle_ocr_images_impl(
             line1_images,
             line_kind="line1",
-            paddle_lang=PADDLEOCR_LANG,
-            paddle_use_gpu=PADDLEOCR_USE_GPU,
+            paddle_lang=runtime_config["paddle_lang"],
+            paddle_use_gpu=runtime_config["paddle_use_gpu"],
             normalize_mrz=normalize_mrz,
             normalize_td3_line1=normalize_td3_line1,
             normalize_td3_line2=normalize_td3_line2,
@@ -373,8 +404,8 @@ def _run_auto_paddle_batches(prepared_splits: list[dict]) -> list[dict]:
         line2_texts = _paddle_ocr_images_impl(
             line2_images,
             line_kind="line2",
-            paddle_lang=PADDLEOCR_LANG,
-            paddle_use_gpu=PADDLEOCR_USE_GPU,
+            paddle_lang=runtime_config["paddle_lang"],
+            paddle_use_gpu=runtime_config["paddle_use_gpu"],
             normalize_mrz=normalize_mrz,
             normalize_td3_line1=normalize_td3_line1,
             normalize_td3_line2=normalize_td3_line2,
@@ -414,30 +445,34 @@ def _run_auto_paddle_batches(prepared_splits: list[dict]) -> list[dict]:
 # OCR
 # -------------------------------------------------------
 
-def _ocr_image(img, cfg: str) -> str:
+def _ocr_image(img, cfg: str, runtime_config: dict | None = None) -> str:
+    runtime_config = runtime_config or _get_runtime_config()
     return _ocr_image_impl(
         img,
         cfg,
-        tesseract_lang=TESSERACT_LANG,
+        tesseract_lang=runtime_config["tesseract_lang"],
         mrz_whitelist=MRZ_WHITELIST,
         normalize_mrz=normalize_mrz,
     )
 
 
-def _resolve_ocr_backends() -> list[str]:
-    return _resolve_ocr_backends_impl(OCR_BACKEND)
+def _resolve_ocr_backends(runtime_config: dict | None = None) -> list[str]:
+    runtime_config = runtime_config or _get_runtime_config()
+    return _resolve_ocr_backends_impl(runtime_config["ocr_backend"])
 
 
 def _trim_line1_spill(text: str) -> str:
     return _trim_line1_spill_impl(text, normalize_td3_line1)
 
 
-def _resolve_paddle_use_gpu() -> bool:
-    return _resolve_paddle_use_gpu_impl(PADDLEOCR_USE_GPU)
+def _resolve_paddle_use_gpu(runtime_config: dict | None = None) -> bool:
+    runtime_config = runtime_config or _get_runtime_config()
+    return _resolve_paddle_use_gpu_impl(runtime_config["paddle_use_gpu"])
 
 
-def _get_paddle_ocr():
-    return _get_paddle_ocr_impl(PADDLEOCR_LANG, PADDLEOCR_USE_GPU)
+def _get_paddle_ocr(runtime_config: dict | None = None):
+    runtime_config = runtime_config or _get_runtime_config()
+    return _get_paddle_ocr_impl(runtime_config["paddle_lang"], runtime_config["paddle_use_gpu"])
 
 
 def _reset_paddle_ocr_stats() -> None:
@@ -499,17 +534,18 @@ def _paddle_ocr_image(img, line_kind: str | None = None) -> str:
 
 
 def generate_ocr_candidates(line_img, prefix: str):
+    runtime_config = _get_runtime_config()
     return generate_ocr_candidates_impl(
         line_img,
         prefix,
         to_gray=_to_gray,
         prepare_variants=_prepare_variants,
-        ocr_backend=OCR_BACKEND,
-        ocr_configs=OCR_CONFIGS,
-        tesseract_lang=TESSERACT_LANG,
+        ocr_backend=runtime_config["ocr_backend"],
+        ocr_configs=runtime_config["ocr_configs"],
+        tesseract_lang=runtime_config["tesseract_lang"],
         mrz_whitelist=MRZ_WHITELIST,
-        paddle_lang=PADDLEOCR_LANG,
-        paddle_use_gpu=PADDLEOCR_USE_GPU,
+        paddle_lang=runtime_config["paddle_lang"],
+        paddle_use_gpu=runtime_config["paddle_use_gpu"],
         normalize_mrz=normalize_mrz,
         normalize_td3_line1=normalize_td3_line1,
         normalize_td3_line2=normalize_td3_line2,
@@ -695,6 +731,7 @@ def _serialize_line2_candidate(c: dict) -> dict:
 
 
 def run_ocr(mrz_img):
+    runtime_config = _get_runtime_config()
     ocr_started_at = time.perf_counter()
     _reset_paddle_ocr_stats()
     if isinstance(mrz_img, str):
@@ -741,6 +778,7 @@ def run_ocr(mrz_img):
     }
     candidate_generation_started_at = time.perf_counter()
     variant_preparation_started_at = time.perf_counter()
+    active_profile = _ocr_search_profile(runtime_config)
 
     def prepare_split_payload(split_info: dict) -> dict:
         split_y = split_info["split_y"]
@@ -749,27 +787,41 @@ def run_ocr(mrz_img):
             "split_info": split_info,
             "line1_img": line1_img,
             "line2_img": line2_img,
-            "line1_variants": _prepare_variants(line1_img, f"line1_{split_info['label']}"),
-            "line2_variants": _prepare_variants(line2_img, f"line2_{split_info['label']}"),
+            "line1_variants": _prepare_variants(
+                line1_img,
+                f"line1_{split_info['label']}",
+                profile=active_profile,
+                runtime_config=runtime_config,
+            ),
+            "line2_variants": _prepare_variants(
+                line2_img,
+                f"line2_{split_info['label']}",
+                profile=active_profile,
+                runtime_config=runtime_config,
+            ),
         }
 
     prepared_splits = []
     if len(split_candidates) <= 1:
         prepared_splits = [prepare_split_payload(split_candidates[0])] if split_candidates else []
     else:
-        max_workers = min(MRZ_VARIANT_WORKERS, len(split_candidates), os.cpu_count() or 1)
+        max_workers = min(runtime_config["variant_workers"], len(split_candidates), os.cpu_count() or 1)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             prepared_splits = list(executor.map(prepare_split_payload, split_candidates))
 
     variant_preparation_ms = round((time.perf_counter() - variant_preparation_started_at) * 1000.0, 2)
     ocr_candidate_eval_started_at = time.perf_counter()
-    auto_paddle_candidates = _run_auto_paddle_batches(prepared_splits) if OCR_BACKEND == "auto" else None
+    auto_paddle_candidates = (
+        _run_auto_paddle_batches(prepared_splits, runtime_config)
+        if runtime_config["ocr_backend"] == "auto"
+        else None
+    )
 
     for split_index, prepared in enumerate(prepared_splits):
         split_info = prepared["split_info"]
         line1_img = prepared["line1_img"]
         line2_img = prepared["line2_img"]
-        if OCR_BACKEND == "auto":
+        if runtime_config["ocr_backend"] == "auto":
             line1_candidates = list(auto_paddle_candidates[split_index]["line1"])
             line2_candidates = list(auto_paddle_candidates[split_index]["line2"])
         else:
@@ -778,12 +830,12 @@ def run_ocr(mrz_img):
                 f"line1_{split_info['label']}",
                 to_gray=_to_gray,
                 prepare_variants=_prepare_variants,
-                ocr_backend=OCR_BACKEND,
-                ocr_configs=OCR_CONFIGS,
-                tesseract_lang=TESSERACT_LANG,
+                ocr_backend=runtime_config["ocr_backend"],
+                ocr_configs=runtime_config["ocr_configs"],
+                tesseract_lang=runtime_config["tesseract_lang"],
                 mrz_whitelist=MRZ_WHITELIST,
-                paddle_lang=PADDLEOCR_LANG,
-                paddle_use_gpu=PADDLEOCR_USE_GPU,
+                paddle_lang=runtime_config["paddle_lang"],
+                paddle_use_gpu=runtime_config["paddle_use_gpu"],
                 normalize_mrz=normalize_mrz,
                 normalize_td3_line1=normalize_td3_line1,
                 normalize_td3_line2=normalize_td3_line2,
@@ -796,12 +848,12 @@ def run_ocr(mrz_img):
                 f"line2_{split_info['label']}",
                 to_gray=_to_gray,
                 prepare_variants=_prepare_variants,
-                ocr_backend=OCR_BACKEND,
-                ocr_configs=OCR_CONFIGS,
-                tesseract_lang=TESSERACT_LANG,
+                ocr_backend=runtime_config["ocr_backend"],
+                ocr_configs=runtime_config["ocr_configs"],
+                tesseract_lang=runtime_config["tesseract_lang"],
                 mrz_whitelist=MRZ_WHITELIST,
-                paddle_lang=PADDLEOCR_LANG,
-                paddle_use_gpu=PADDLEOCR_USE_GPU,
+                paddle_lang=runtime_config["paddle_lang"],
+                paddle_use_gpu=runtime_config["paddle_use_gpu"],
                 normalize_mrz=normalize_mrz,
                 normalize_td3_line1=normalize_td3_line1,
                 normalize_td3_line2=normalize_td3_line2,
@@ -853,8 +905,8 @@ def run_ocr(mrz_img):
         line1_candidates = _prepare_line1_candidates(line1_candidates)
         line2_candidates = _prepare_line2_candidates(line2_candidates)
 
-        if OCR_BACKEND == "auto":
-            if _auto_requires_tesseract(line1_candidates, line2_candidates):
+        if runtime_config["ocr_backend"] == "auto":
+            if _auto_requires_tesseract(line1_candidates, line2_candidates, runtime_config):
                 auto_stats["tesseract_fallback_splits"] += 1
                 line1_candidates.extend(
                     _prepare_line1_candidates(
@@ -864,11 +916,11 @@ def run_ocr(mrz_img):
                             to_gray=_to_gray,
                             prepare_variants=_prepare_variants,
                             ocr_backend="tesseract",
-                            ocr_configs=OCR_CONFIGS,
-                            tesseract_lang=TESSERACT_LANG,
+                            ocr_configs=runtime_config["ocr_configs"],
+                            tesseract_lang=runtime_config["tesseract_lang"],
                             mrz_whitelist=MRZ_WHITELIST,
-                            paddle_lang=PADDLEOCR_LANG,
-                            paddle_use_gpu=PADDLEOCR_USE_GPU,
+                            paddle_lang=runtime_config["paddle_lang"],
+                            paddle_use_gpu=runtime_config["paddle_use_gpu"],
                             normalize_mrz=normalize_mrz,
                             normalize_td3_line1=normalize_td3_line1,
                             normalize_td3_line2=normalize_td3_line2,
@@ -886,11 +938,11 @@ def run_ocr(mrz_img):
                             to_gray=_to_gray,
                             prepare_variants=_prepare_variants,
                             ocr_backend="tesseract",
-                            ocr_configs=OCR_CONFIGS,
-                            tesseract_lang=TESSERACT_LANG,
+                            ocr_configs=runtime_config["ocr_configs"],
+                            tesseract_lang=runtime_config["tesseract_lang"],
                             mrz_whitelist=MRZ_WHITELIST,
-                            paddle_lang=PADDLEOCR_LANG,
-                            paddle_use_gpu=PADDLEOCR_USE_GPU,
+                            paddle_lang=runtime_config["paddle_lang"],
+                            paddle_use_gpu=runtime_config["paddle_use_gpu"],
                             normalize_mrz=normalize_mrz,
                             normalize_td3_line1=normalize_td3_line1,
                             normalize_td3_line2=normalize_td3_line2,
@@ -929,7 +981,7 @@ def run_ocr(mrz_img):
             "line2_img": line2_img,
         })
 
-        if _should_early_accept_paddle_split(split_info, line1_ranked, line2_ranked):
+        if _should_early_accept_paddle_split(split_info, line1_ranked, line2_ranked, runtime_config):
             break
 
     ocr_candidate_eval_ms = round((time.perf_counter() - ocr_candidate_eval_started_at) * 1000.0, 2)
@@ -1133,9 +1185,9 @@ def run_ocr(mrz_img):
         "repairs_applied": best_pair["repairs_applied"],
         "parsed_fields": parsed,
         "backend_stats": {
-            "backend": OCR_BACKEND,
-            "paddle": _get_paddle_ocr_stats() if OCR_BACKEND in {"paddle", "auto", "hybrid", "both"} else None,
-            "auto": auto_stats if OCR_BACKEND == "auto" else None,
+            "backend": runtime_config["ocr_backend"],
+            "paddle": _get_paddle_ocr_stats() if runtime_config["ocr_backend"] in {"paddle", "auto", "hybrid", "both"} else None,
+            "auto": auto_stats if runtime_config["ocr_backend"] == "auto" else None,
         },
         "timing_ms": {
             "total_ocr_ms": round((time.perf_counter() - ocr_started_at) * 1000.0, 2),
@@ -1182,5 +1234,5 @@ def run_ocr(mrz_img):
 # -------------------------------------------------------
 
 if __name__ == "__main__":
-    mrz_image = os.path.join(OUTPUT_DIR, "mrz_region.png")
+    mrz_image = os.path.join(_get_output_dir(), "mrz_region.png")
     run_ocr(mrz_image)
