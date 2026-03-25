@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 
-_PADDLE_OCR_INSTANCE = None
+_PADDLE_OCR_INSTANCES = {}
 _PADDLE_OCR_STATS = {}
 
 
@@ -104,27 +104,48 @@ def resolve_paddle_use_gpu(use_gpu_requested: bool) -> bool:
     return True
 
 
-def get_paddle_ocr(lang: str, use_gpu_requested: bool):
-    global _PADDLE_OCR_INSTANCE
+def reset_paddle_ocr_cache() -> None:
+    global _PADDLE_OCR_INSTANCES
+    _PADDLE_OCR_INSTANCES = {}
 
-    if _PADDLE_OCR_INSTANCE is not None:
-        return _PADDLE_OCR_INSTANCE
 
-    paddle_cache_home = resolve_paddle_cache_home()
-    os.environ["PADDLE_PDX_CACHE_HOME"] = paddle_cache_home
-    os.makedirs(paddle_cache_home, exist_ok=True)
-    ensure_stub_ccache_on_path()
-    if should_disable_paddle_model_source_check(paddle_cache_home):
-        os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+def _parse_optional_float_env(name: str):
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
 
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        try:
-            from paddleocr import PaddleOCR
-        except ImportError as exc:
-            raise RuntimeError(
-                "PaddleOCR backend requested but 'paddleocr' is not installed in the active environment"
-            ) from exc
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"[WARN] Ignoring invalid float in {name}: {raw}")
+        return None
 
+
+def _parse_choice_env(name: str, allowed: set[str]) -> str:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return ""
+    if raw in allowed:
+        return raw
+    print(f"[WARN] Ignoring invalid value in {name}: {raw}")
+    return ""
+
+
+def _resolve_paddle_det_model_name(variant: str) -> str | None:
+    if not variant:
+        return None
+    return f"PP-OCRv5_{variant}_det"
+
+
+def _resolve_paddle_rec_model_name(lang: str, variant: str) -> str | None:
+    if not variant:
+        return None
+    if lang == "en":
+        return f"en_PP-OCRv5_{variant}_rec"
+    return None
+
+
+def build_paddle_ocr_kwargs(PaddleOCR, lang: str, use_gpu_requested: bool) -> dict:
     use_gpu = resolve_paddle_use_gpu(use_gpu_requested)
     kwargs = {"lang": lang}
     signature = inspect.signature(PaddleOCR.__init__)
@@ -142,9 +163,60 @@ def get_paddle_ocr(lang: str, use_gpu_requested: bool):
     if "ocr_version" in signature.parameters:
         kwargs["ocr_version"] = "PP-OCRv5"
 
+    det_variant = _parse_choice_env("PADDLEOCR_DET_MODEL_VARIANT", {"mobile", "server"})
+    rec_variant = _parse_choice_env("PADDLEOCR_REC_MODEL_VARIANT", {"mobile", "server"})
+    det_model_name = os.getenv("PADDLEOCR_TEXT_DETECTION_MODEL_NAME", "").strip()
+    rec_model_name = os.getenv("PADDLEOCR_TEXT_RECOGNITION_MODEL_NAME", "").strip()
+    det_model_dir = os.getenv("PADDLEOCR_TEXT_DETECTION_MODEL_DIR", "").strip()
+    rec_model_dir = os.getenv("PADDLEOCR_TEXT_RECOGNITION_MODEL_DIR", "").strip()
+    rec_score_thresh = _parse_optional_float_env("PADDLEOCR_TEXT_REC_SCORE_THRESH")
+
+    if not det_model_name:
+        det_model_name = _resolve_paddle_det_model_name(det_variant) or ""
+    if not rec_model_name:
+        rec_model_name = _resolve_paddle_rec_model_name(lang, rec_variant) or ""
+
+    if det_model_name and "text_detection_model_name" in signature.parameters:
+        kwargs["text_detection_model_name"] = det_model_name
+    if rec_model_name and "text_recognition_model_name" in signature.parameters:
+        kwargs["text_recognition_model_name"] = rec_model_name
+    if det_model_dir and "text_detection_model_dir" in signature.parameters:
+        kwargs["text_detection_model_dir"] = det_model_dir
+    if rec_model_dir and "text_recognition_model_dir" in signature.parameters:
+        kwargs["text_recognition_model_dir"] = rec_model_dir
+    if rec_score_thresh is not None and "text_rec_score_thresh" in signature.parameters:
+        kwargs["text_rec_score_thresh"] = rec_score_thresh
+
+    return kwargs
+
+
+def get_paddle_ocr(lang: str, use_gpu_requested: bool):
+    global _PADDLE_OCR_INSTANCES
+
+    paddle_cache_home = resolve_paddle_cache_home()
+    os.environ["PADDLE_PDX_CACHE_HOME"] = paddle_cache_home
+    os.makedirs(paddle_cache_home, exist_ok=True)
+    ensure_stub_ccache_on_path()
+    if should_disable_paddle_model_source_check(paddle_cache_home):
+        os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        _PADDLE_OCR_INSTANCE = PaddleOCR(**kwargs)
-    return _PADDLE_OCR_INSTANCE
+        try:
+            from paddleocr import PaddleOCR
+        except ImportError as exc:
+            raise RuntimeError(
+                "PaddleOCR backend requested but 'paddleocr' is not installed in the active environment"
+            ) from exc
+
+    kwargs = build_paddle_ocr_kwargs(PaddleOCR, lang, use_gpu_requested)
+    cache_key = tuple(sorted(kwargs.items()))
+    cached = _PADDLE_OCR_INSTANCES.get(cache_key)
+    if cached is not None:
+        return cached
+
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        _PADDLE_OCR_INSTANCES[cache_key] = PaddleOCR(**kwargs)
+    return _PADDLE_OCR_INSTANCES[cache_key]
 
 
 def _normalize_paddle_confidence(value):

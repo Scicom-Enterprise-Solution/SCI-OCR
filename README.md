@@ -47,6 +47,13 @@ The project loads values from `.env` automatically (if present).
 - `OCR_BACKEND` - OCR backend selection: `tesseract`, `paddle`, or `auto`
 - `PADDLEOCR_LANG` - Optional PaddleOCR language code when PaddleOCR is enabled
 - `PADDLEOCR_USE_GPU` - Optional boolean for PaddleOCR GPU inference
+- `PADDLEOCR_DET_MODEL_VARIANT` - Optional PP-OCRv5 detector family override: `mobile` or `server`
+- `PADDLEOCR_REC_MODEL_VARIANT` - Optional PP-OCRv5 recognizer family override: `mobile` or `server`
+- `PADDLEOCR_TEXT_DETECTION_MODEL_NAME` - Optional explicit Paddle text-detection model name override
+- `PADDLEOCR_TEXT_RECOGNITION_MODEL_NAME` - Optional explicit Paddle text-recognition model name override
+- `PADDLEOCR_TEXT_DETECTION_MODEL_DIR` - Optional explicit local Paddle text-detection model directory
+- `PADDLEOCR_TEXT_RECOGNITION_MODEL_DIR` - Optional explicit local Paddle text-recognition model directory
+- `PADDLEOCR_TEXT_REC_SCORE_THRESH` - Optional Paddle recognition score threshold passthrough
 - `PADDLE_PDX_CACHE_HOME` - Optional Paddle model/cache directory. Prefer a project-relative path such as `.paddlex` for portability across servers.
 - `FAST_OCR` - Optional speed-only mode. When `true`, Stage 3 uses a much smaller OCR search space for faster runs, but it can reduce name-field accuracy.
 - `PADDLE_PROFILE` - Paddle search profile: `exhaustive`, `balanced`, or `fast`
@@ -362,6 +369,10 @@ OCR-B and current Paddle models:
 - The current project cache already includes models such as:
   - `PP-OCRv5_server_det`
   - `en_PP-OCRv5_mobile_rec`
+- The OCR adapter now supports env-driven Paddle model A/B testing without code changes:
+  - leave the model overrides blank to use PaddleOCR's default PP-OCRv5 model selection
+  - set `PADDLEOCR_REC_MODEL_VARIANT=server` to test the stronger English recognizer
+  - use the explicit `PADDLEOCR_TEXT_*_MODEL_NAME` or `PADDLEOCR_TEXT_*_MODEL_DIR` values to pin exact models
 - The compose service is also wired for repo-local Tesseract OCR-B data through:
   - `TESSDATA_PREFIX=/workspace/docker/tessdata`
   - `TESSERACT_LANG=ocrb`

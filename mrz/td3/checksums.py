@@ -87,9 +87,16 @@ def _field_correction_key(candidate: str, original: str, field_kind: str) -> tup
     edits = sum(1 for src, dst in zip(original, candidate) if src != dst)
 
     if field_kind == "document_number":
+        candidate_starts_alpha = int(bool(candidate) and candidate[0].isalpha())
+        original_first = original[0] if original else ""
+        prefer_alpha_prefix = int(
+            candidate_starts_alpha
+            and original_first in {"1", "I", "L", "l", "|"}
+        )
         return (
+            prefer_alpha_prefix,
             -_ambiguous_doc_char_count(candidate),
-            int(bool(candidate) and candidate[0].isalpha()),
+            candidate_starts_alpha,
             -edits,
             candidate,
         )

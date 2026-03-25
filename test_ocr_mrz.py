@@ -35,6 +35,7 @@ from mrz.td3.ocr_pipeline import (
     validate_td3_checks,
 )
 from mrz.td3.checksums import build_checksum_confidence
+from mrz.td3.checksums import DOC_NUMBER_AMBIGUOUS_SUBS, correct_field
 from mrz.td3.ocr_runner import extract_ocr_confidence
 from mrz.td3.repair import build_repair_confidence
 from mrz.td3.score import (
@@ -43,7 +44,13 @@ from mrz.td3.score import (
     build_structure_confidence,
 )
 from mrz.td3.detect import merge_bboxes, prepare_detection_roi, scale_bboxes_back
-from ocr_backends.paddle_backend import get_paddle_ocr_stats, paddle_ocr_images, reset_paddle_ocr_stats
+from ocr_backends.paddle_backend import (
+    build_paddle_ocr_kwargs,
+    get_paddle_ocr_stats,
+    paddle_ocr_images,
+    reset_paddle_ocr_cache,
+    reset_paddle_ocr_stats,
+)
 
 
 class TestLine1Repair(unittest.TestCase):
@@ -79,6 +86,14 @@ class TestLine1Repair(unittest.TestCase):
 
     def test_preserves_multiple_given_names(self) -> None:
         line = normalize_td3_line1("P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<")
+
+        repaired, repairs = repair_td3_line1(line)
+
+        self.assertEqual(repaired, line)
+        self.assertEqual(repairs, [])
+
+    def test_single_separator_name_zone_is_not_rewritten_from_filler_tail(self) -> None:
+        line = "PRMDVYOOSUF<AZYAN<FARHATH<<<<<<<<<<<<<<<<<<<"
 
         repaired, repairs = repair_td3_line1(line)
 
@@ -838,8 +853,38 @@ class TestOcrBackendSelection(unittest.TestCase):
                 os.environ.pop("OCR_BACKEND", None)
             else:
                 os.environ["OCR_BACKEND"] = previous
-            from mrz.td3 import ocr_pipeline
-            importlib.reload(ocr_pipeline)
+
+
+class TestChecksumFieldRepair(unittest.TestCase):
+    def test_document_number_prefers_alpha_prefix_over_ambiguous_digit(self) -> None:
+        repaired = correct_field(
+            "1A36E7777",
+            "8",
+            substitutions=DOC_NUMBER_AMBIGUOUS_SUBS,
+            field_kind="document_number",
+        )
+
+        self.assertEqual(repaired, "LA36E7777")
+
+    def test_document_number_keeps_valid_numeric_prefix(self) -> None:
+        repaired = correct_field(
+            "551356455",
+            "1",
+            substitutions=DOC_NUMBER_AMBIGUOUS_SUBS,
+            field_kind="document_number",
+        )
+
+        self.assertEqual(repaired, "551356455")
+
+
+class TestPaddleLine1Repair(unittest.TestCase):
+    def test_paddle_repair_skips_single_separator_name_zone(self) -> None:
+        line = "PRMDVYOOSUFAZYANFARHATH<<<<<<<<<<<<<<<<<<<<<"
+
+        repaired, meta = _repair_paddle_line1_candidate(line)
+
+        self.assertEqual(repaired, line)
+        self.assertIsNone(meta)
 
 class TestPaddleOcrAdapter(unittest.TestCase):
     def test_resolve_paddle_use_gpu_returns_true_when_cuda_device_is_visible(self) -> None:
@@ -847,9 +892,74 @@ class TestPaddleOcrAdapter(unittest.TestCase):
         fake_paddle.device.is_compiled_with_cuda.return_value = True
         fake_paddle.device.cuda.device_count.return_value = 1
 
-        with mock.patch("mrz.td3.ocr_pipeline.PADDLEOCR_USE_GPU", True):
-            with mock.patch.dict(sys.modules, {"paddle": fake_paddle}):
-                self.assertTrue(_resolve_paddle_use_gpu())
+        with mock.patch.dict(sys.modules, {"paddle": fake_paddle}):
+            self.assertTrue(_resolve_paddle_use_gpu({"paddle_use_gpu": True}))
+
+    def test_build_paddle_ocr_kwargs_uses_server_rec_variant_for_en(self) -> None:
+        class FakePaddleOCR:
+            def __init__(
+                self,
+                lang=None,
+                use_gpu=None,
+                show_log=None,
+                use_doc_orientation_classify=None,
+                use_doc_unwarping=None,
+                use_textline_orientation=None,
+                ocr_version=None,
+                text_detection_model_name=None,
+                text_recognition_model_name=None,
+                text_rec_score_thresh=None,
+                **kwargs,
+            ):
+                pass
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "PADDLEOCR_DET_MODEL_VARIANT": "server",
+                "PADDLEOCR_REC_MODEL_VARIANT": "server",
+                "PADDLEOCR_TEXT_REC_SCORE_THRESH": "0.83",
+            },
+            clear=False,
+        ):
+            kwargs = build_paddle_ocr_kwargs(FakePaddleOCR, "en", False)
+
+        self.assertEqual(kwargs["ocr_version"], "PP-OCRv5")
+        self.assertEqual(kwargs["text_detection_model_name"], "PP-OCRv5_server_det")
+        self.assertEqual(kwargs["text_recognition_model_name"], "en_PP-OCRv5_server_rec")
+        self.assertEqual(kwargs["text_rec_score_thresh"], 0.83)
+
+    def test_build_paddle_ocr_kwargs_respects_explicit_model_names(self) -> None:
+        class FakePaddleOCR:
+            def __init__(
+                self,
+                lang=None,
+                use_gpu=None,
+                show_log=None,
+                use_doc_orientation_classify=None,
+                use_doc_unwarping=None,
+                use_textline_orientation=None,
+                ocr_version=None,
+                text_detection_model_name=None,
+                text_recognition_model_name=None,
+                **kwargs,
+            ):
+                pass
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "PADDLEOCR_TEXT_DETECTION_MODEL_NAME": "PP-OCRv5_mobile_det",
+                "PADDLEOCR_TEXT_RECOGNITION_MODEL_NAME": "en_PP-OCRv5_server_rec",
+                "PADDLEOCR_DET_MODEL_VARIANT": "server",
+                "PADDLEOCR_REC_MODEL_VARIANT": "mobile",
+            },
+            clear=False,
+        ):
+            kwargs = build_paddle_ocr_kwargs(FakePaddleOCR, "en", False)
+
+        self.assertEqual(kwargs["text_detection_model_name"], "PP-OCRv5_mobile_det")
+        self.assertEqual(kwargs["text_recognition_model_name"], "en_PP-OCRv5_server_rec")
 
     def test_paddle_ocr_image_converts_grayscale_to_bgr(self) -> None:
         seen = {}
@@ -868,6 +978,7 @@ class TestPaddleOcrAdapter(unittest.TestCase):
     def test_paddle_ocr_images_uses_batch_predict_when_available(self) -> None:
         seen = {}
         reset_paddle_ocr_stats()
+        reset_paddle_ocr_cache()
 
         class FakePaddleOCR:
             def predict(self, imgs):

@@ -587,10 +587,12 @@ def repair_td3_line1(line1: str, *, trim_line1_spill_func) -> tuple[str, list[di
     issuing_country = line[2:5]
     name_zone = line[5:]
 
-    if "<<" not in name_zone:
+    name_core = name_zone.rstrip("<")
+    if "<<" not in name_core:
         return line, repairs
 
-    surname_raw, given_raw = name_zone.split("<<", 1)
+    surname_raw, given_core = name_core.split("<<", 1)
+    given_raw = given_core + name_zone[len(name_core):]
     surname = _sanitize_name_token(surname_raw)
     given_token, given_tail = _split_given_name_zone(given_raw)
 
@@ -685,11 +687,13 @@ def repair_paddle_line1_candidate(line1: str, *, trim_line1_spill_func) -> tuple
 
     document_code = line[:2]
     name_zone = line[5:]
-    if "<<" not in name_zone:
+    name_core = name_zone.rstrip("<")
+    if "<<" not in name_core:
         return line, None
 
     issuing_country = line[2:5]
-    surname_raw, given_raw = name_zone.split("<<", 1)
+    surname_raw, given_core = name_core.split("<<", 1)
+    given_raw = given_core + name_zone[len(name_core):]
     surname = _sanitize_name_token(surname_raw)
 
     if not surname:
