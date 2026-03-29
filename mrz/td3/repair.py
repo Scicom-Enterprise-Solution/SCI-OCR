@@ -657,16 +657,19 @@ def repair_td3_line1(line1: str, *, trim_line1_spill_func) -> tuple[str, list[di
         document_code=document_code,
     )
 
+    original_line_score = score_td3_line1(line)
+    rebuilt_line_score = score_td3_line1(rebuilt)
+    late_tail_fragment = re.search(r"<{8,}[A-Z]{1,4}<{2,}$", given_raw) is not None
     if rebuilt != line:
-        repairs.append({
-            "field": "line1",
-            "position": "name",
-            "from": name_zone,
-            "to": f"{surname}<<{given_token}{given_tail}",
-            "reason": "name_noise_collapse",
-        })
-
-    line = rebuilt
+        if not late_tail_fragment and (repairs or rebuilt_line_score > original_line_score):
+            repairs.append({
+                "field": "line1",
+                "position": "name",
+                "from": name_zone,
+                "to": f"{surname}<<{given_token}{given_tail}",
+                "reason": "name_noise_collapse",
+            })
+            line = rebuilt
 
     if 3 <= len(given_token) <= 8:
         repaired_token, meta = repair_given_name_token(given_token)
@@ -743,6 +746,14 @@ def repair_paddle_line1_candidate(line1: str, *, trim_line1_spill_func) -> tuple
     best_score, _, _, best_surname, best_line = max(ranked)
     if best_surname == surname or best_score < baseline_score:
         return line, None
+    if best_score == baseline_score:
+        changed_positions = [i for i, (a, b) in enumerate(zip(surname, best_surname)) if a != b]
+        if (
+            len(changed_positions) != 1
+            or changed_positions[0] < len(surname) - 3
+            or best_surname[-3:] not in {"MAN", "MAD"}
+        ):
+            return line, None
 
     return best_line, {
         "field": "line1",

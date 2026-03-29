@@ -173,6 +173,9 @@ def score_td3_line1(text: str) -> float:
         if suspicious_tail_fragments >= 2:
             score -= suspicious_tail_fragments * 12.0
 
+        if re.search(r"<{8,}[A-Z]{1,4}<{2,}$", filler_tail):
+            score -= 24.0
+
         tail_letters = sum(1 for c in tail_remainder if "A" <= c <= "Z")
         tail_fillers = filler_tail.count("<")
         score -= tail_letters * 2.5

@@ -200,6 +200,17 @@ class TestLine1Repair(unittest.TestCase):
         )
         self.assertEqual(repairs, [])
 
+    def test_repair_td3_line1_skips_equal_score_tail_collapse_for_inam_old_pattern(self) -> None:
+        repaired, repairs = repair_td3_line1(
+            "P<BGDAHAHED<<INAM<<<<<<<<<<<<<<<<<<<<EK<<<<<"
+        )
+
+        self.assertEqual(
+            repaired,
+            "P<BGDAHAHED<<INAM<<<<<<<<<<<<<<<<<<<<EK<<<<<",
+        )
+        self.assertEqual(repairs, [])
+
     def test_repairs_surname_mn_ambiguity_for_rahman(self) -> None:
         repaired, repairs = repair_td3_line1(
             "P<BGDRAHMAM<<MD<MAHBUBUR<<<<<<<<<<<<<<<<<<<<"
@@ -211,11 +222,40 @@ class TestLine1Repair(unittest.TestCase):
         )
         self.assertTrue(any(r["reason"] == "surname_ambiguity_repair" for r in repairs))
 
+    def test_paddle_surname_ambiguity_repair_skips_equal_score_tanvir_case(self) -> None:
+        repaired, meta = _repair_paddle_line1_candidate(
+            "P<BGDTANVIR<<MOSHIUR<RAHMAN<<<<<<<<<<<<<<<<<"
+        )
+
+        self.assertEqual(
+            repaired,
+            "P<BGDTANVIR<<MOSHIUR<RAHMAN<<<<<<<<<<<<<<<<<",
+        )
+        self.assertIsNone(meta)
+
+    def test_paddle_surname_ambiguity_repair_allows_equal_score_ahnad_to_ahmad(self) -> None:
+        repaired, meta = _repair_paddle_line1_candidate(
+            "P<BGDAHNAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<"
+        )
+
+        self.assertEqual(
+            repaired,
+            "P<BGDAHMAD<<ADEELA<<<<<<<<<<<<<<<<<<<<<<<<<<",
+        )
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta["reason"], "paddle_surname_ambiguity_repair")
+
     def test_score_prefers_full_dzhakhongir_over_trimmed_dzhakho(self) -> None:
         full = score_td3_line1("P<RUSAMIRKULOV<<DZHAKHONGIR<<<<<<<<<<<<<<<<<")
         trimmed = score_td3_line1("P<RUSAMIRKULOV<<DZHAKHO<<<<<<<<<<<<<<<<<<<<<")
 
         self.assertGreater(full, trimmed)
+
+    def test_score_penalizes_late_tail_letters_after_long_filler_run(self) -> None:
+        leaked = score_td3_line1("P<BGDAHAHED<<INAM<<<<<<<<<<<<<<<<<<<<EK<<<<<")
+        clean = score_td3_line1("P<BGDAHAMED<<INAM<<<<<<<<<<<<<<<<<<<<<<<<<<<")
+
+        self.assertGreater(clean, leaked)
 
     def test_repairs_noise_before_country_code(self) -> None:
         repaired, meta = repair_issuing_country_code(
